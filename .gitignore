@@ -1,0 +1,8 @@
+apn_env/ 
+venv/ 
+data/ 
+result/ 
+*.csv 
+*.log 
+__pycache__/ 
+*.pyc 
