@@ -17,6 +17,8 @@ import warnings
 import requests
 import time
 import logging
+
+sys.path.append(".")
 from data.dependencies.tsdm.tasks.P12 import Physionet2012
 
 warnings.filterwarnings("ignore")
