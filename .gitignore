@@ -1,7 +1,8 @@
 apn_env/ 
 venv/ 
-data/ 
+/data/
 result/ 
+.venv/
 *.csv 
 *.log 
 __pycache__/ 

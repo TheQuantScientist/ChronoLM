@@ -1,185 +1,98 @@
-# ChronoLM — Small Language Models as Irregular Time Series Forecasters
+# ChronoLM
 
-Dự án so sánh khả năng forecast chuỗi thời gian y tế bất quy tắc (irregular clinical time series) giữa **Small Language Models (SLM)** như Gemma / Llama / Hermes và mô hình deep learning **APN** trên bộ dữ liệu **PhysioNet 2012 (P12)**.
+ChronoLM compares small language models against APN on irregular clinical time
+series forecasting. The current benchmark uses the APN PhysioNet 2012 (P12)
+data pipeline, split, scaling, and metrics, then replaces the trained APN model
+with zero-shot LLM forecasts through an OpenAI-compatible API.
 
-Ý tưởng cốt lõi: dùng chung toàn bộ data pipeline của APN (cùng cách load, scale, split, cùng metric) nhưng thay phần model bằng SLM chạy zero-shot qua API, để so sánh công bằng.
+## Repository Layout
 
----
+| Path | Purpose |
+|------|---------|
+| `APN/` | Upstream APN implementation and baseline training scripts. Keep this close to upstream. |
+| `APN/data/` | APN data-loader source code and vendored `tsdm` code. This is source code, not raw data. |
+| `src/chronolm/` | Active ChronoLM package code. |
+| `run_p12_gemma.py` | Root-level entry point for the main Gemma-vs-APN experiment. |
+| `scripts/` | Small diagnostic scripts for APN P12 data inspection. |
+| `legacy/ollama_sliding_window/` | Older processed-CSV/Ollama prototype code, kept only for reference. |
 
-## 1. Yêu cầu hệ thống
-
-- **Python 3.11** (khuyến nghị, khớp với môi trường APN gốc)
-- Kết nối internet (lần đầu chạy sẽ tự tải data PhysioNet)
-- Một API endpoint chạy SLM theo chuẩn OpenAI (LiteLLM proxy hoặc tương tự)
-
----
-
-## 2. Cài đặt
-
-### 2.1. Clone repo
-
-```bash
-git clone -b chrono https://github.com/TheQuantScientist/ChronoLM.git
-cd ChronoLM
-```
-
-### 2.2. Tạo môi trường ảo
-
-**Windows (PowerShell):**
-```bash
-python -m venv apn_env
-apn_env\Scripts\activate
-```
-
-**Linux / Mac:**
-```bash
-python -m venv apn_env
-source apn_env/bin/activate
-```
-
-### 2.3. Cài thư viện
+Raw dataset cache lives outside the repo:
 
 ```bash
-pip install -r requirements.txt
+~/.tsdm/
 ```
 
-Nếu chưa có `requirements.txt`, cài các gói chính:
+## Setup
+
+Python 3.11 is recommended because APN was tested against that version.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r APN/requirements.txt
+```
+
+If the environment is missing common packages, install:
 
 ```bash
 pip install torch pandas numpy scikit-learn requests pyarrow
-cd APN
-pip install -r requirements.txt
 ```
 
----
+## Configure The LLM Endpoint
 
-## 3. Dữ liệu — TỰ ĐỘNG TẢI
-
-**Không cần copy data thủ công.** Folder `data/` không được đẩy lên git vì dung lượng lớn.
-
-Khi chạy lần đầu, thư viện `tsdm` sẽ tự động:
-1. Tải PhysioNet 2012 (set A, B, C) từ nguồn gốc
-2. Giải nén và cache vào `~/.tsdm/datasets/Physionet2012/`
-3. Các lần chạy sau đọc từ cache, không tải lại
-
-Quá trình tải + xử lý lần đầu mất khoảng 5–10 phút tùy mạng.
-
-Class load data nằm ở:
-```
-APN/data/dependencies/tsdm/tasks/P12.py  ->  class Physionet2012
-```
-
-Cấu hình mặc định (giống paper APN):
-- `seq_len = 36` — lookback 36 giờ đầu
-- `pred_len = 3` — forecast 3 quan sát kế tiếp
-- Split 80% train / 10% val / 10% test
-- Scale bằng `Standardizer` (z-score), fit trên toàn bộ data
-- 36 biến lâm sàng
-
----
-
-## 4. Cấu hình API (SLM)
-
-Mở file `APN/gemma.py`, chỉnh 3 dòng đầu cho khớp server của bạn:
-
-```python
-API_URL   = "https://<your-server>.trycloudflare.com/v1/chat/completions"
-HF_MODEL_ID = "google/gemma-3-4b-it"   # hoặc model khác
-API_KEY   = "your-api-key"
-```
-
-Server phải hỗ trợ chuẩn OpenAI `/v1/chat/completions`. Kiểm tra nhanh trước khi chạy:
+The Gemma experiment reads these environment variables:
 
 ```bash
-python -c "import requests; r=requests.post('https://<your-server>/v1/chat/completions', json={'model':'google/gemma-3-4b-it','messages':[{'role':'user','content':'1+1=?'}],'max_tokens':10}, headers={'Authorization':'Bearer your-api-key','Content-Type':'application/json'}, timeout=30); print(r.status_code, r.text[:200])"
+export CHRONOLM_API_URL="https://your-server/v1/chat/completions"
+export CHRONOLM_MODEL_ID="google/gemma-3-4b-it"
+export CHRONOLM_API_KEY="your-api-key"
 ```
 
-Thấy `200` và có nội dung trả về là OK.
+Defaults are still present in the code for the current internal LiteLLM proxy,
+but environment variables should be preferred for new runs.
 
----
+## Run The Main Experiment
 
-## 5. Chạy thực nghiệm
+Run from the repository root:
 
-Từ trong folder `APN`:
+```bash
+python run_p12_gemma.py
+```
+
+The first run may download and preprocess PhysioNet 2012 into `~/.tsdm/`.
+Later runs reuse the cache.
+
+## Diagnostic Scripts
+
+Run these from the repository root:
+
+```bash
+python scripts/p12_target_coverage.py
+python scripts/p12_obs_count.py
+python scripts/p12_debug_splits.py
+```
+
+## Outputs
+
+The Gemma runner writes:
+
+| File | Purpose |
+|------|---------|
+| `Gemma_temp06_P12_Results.csv` | Summary MAE/MSE by variable. |
+| `Gemma_temp06_P12_Checkpoint.csv` | Per-variable checkpoint for resuming interrupted runs. |
+| `Gemma_temp06_P12_DetailLog.csv` | Per-prediction actual vs predicted values. |
+| `gemma_temp06_debug.log` | Prompt, response, fallback, and progress logging. |
+
+Generated CSV and log files are ignored by git.
+
+## APN Baseline
+
+APN baseline training still uses the upstream scripts:
 
 ```bash
 cd APN
-python gemma.py
-```
-
-Hoặc chạy nền trên server (Linux), treo cho tới khi xong:
-
-```bash
-nohup python gemma.py > gemma_run.log 2>&1 &
-```
-
-Theo dõi tiến trình:
-
-```bash
-tail -f gemma_run.log
-```
-
----
-
-## 6. Cơ chế của `gemma.py`
-
-Với mỗi biến (trong 36 biến) và mỗi bệnh nhân trong tập test:
-
-1. Lấy toàn bộ observation trong 36h đầu (bỏ giá trị NaN)
-2. Chuyển scaled → raw để đưa vào prompt (SLM hiểu giá trị thật tốt hơn)
-3. Đóng gói thành JSON có `timestamp` + `value`
-4. Gọi SLM dự đoán 3 giá trị kế tiếp cùng lúc (one-shot, không dùng giá trị thật giữa các bước)
-5. Parse số từ output, clamp trong khoảng 3-sigma của history để loại outlier
-6. Nếu parse thất bại → fallback dùng giá trị quan sát cuối
-7. Chuyển prediction về scaled, tính MAE / MSE trên scaled (khớp cách APN báo cáo)
-
-**Checkpoint:** kết quả từng biến được lưu ngay sau khi chạy xong. Nếu bị ngắt giữa chừng, chạy lại sẽ tự bỏ qua biến đã xong và tiếp tục phần còn lại.
-
----
-
-## 7. File kết quả
-
-Sau khi chạy xong, sinh ra:
-
-| File | Nội dung |
-|------|----------|
-| `*_Results.csv` | Bảng tổng hợp MAE / MSE / fallback cho 36 biến |
-| `*_Checkpoint.csv` | Checkpoint chống mất tiến trình |
-| `*_DetailLog.csv` | Log từng prediction (actual vs predicted) |
-| `gemma_debug.log` | Log input/output để debug |
-
-Cuối log sẽ in bảng so sánh trung bình 36 biến giữa SLM và APN (paper: MAE=0.3762, MSE=0.2936).
-
----
-
-## 8. So sánh nhiều model
-
-Đổi `HF_MODEL_ID` và tên file output trong `gemma.py`, rồi chạy lại để benchmark model khác:
-
-```python
-HF_MODEL_ID = "meta-llama/Llama-3.2-3B-Instruct"
-OUTPUT_CSV  = "Llama_vs_APN_P12_Results.csv"
-```
-
----
-
-## 9. Chạy APN gốc (baseline)
-
-Để lấy số liệu APN so sánh, chạy script gốc trong folder `APN`:
-
-```bash
-cd APN
-# Windows: mở scripts/APN/P12.sh xem lệnh python bên trong rồi chạy trực tiếp
-# Linux:
 chmod +x ./scripts/APN/P12.sh
 ./scripts/APN/P12.sh
 ```
 
-APN cần GPU để train (200 epochs). Máy không GPU chỉ chạy được để kiểm tra setup.
-
----
-
-## Ghi chú
-
-- Điểm khác biệt chính: APN là neural network được train (nhận tensor số), còn SLM chạy zero-shot (nhận text). Setup thí nghiệm giống hệt nhau; chỉ khác paradigm xử lý.
-- Data không đẩy lên git — luôn để `tsdm` tự tải để đảm bảo đúng bản gốc.
+That path is intentionally separate from the ChronoLM runner.

@@ -54,7 +54,7 @@ def compute_all_metrics(y_true, y_pred, y_last_obs_list=None):
 
 def wilcoxon_test(errors_a, errors_b, model_a="A", model_b="B"):
     errors_a, errors_b = np.asarray(errors_a), np.asarray(errors_b)
-    assert len(errors_a) == len(errors_b), "Can cung so test sample"
+    assert len(errors_a) == len(errors_b), "Both models need the same number of test samples"
     stat, p_value = stats.wilcoxon(errors_a, errors_b)
     winner = model_a if np.mean(errors_a) < np.mean(errors_b) else model_b
     return {

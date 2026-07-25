@@ -1,5 +1,5 @@
 """
-llm_ollama.py - 6 model SLM cho thực nghiệm so sánh.
+llm_ollama.py - Ollama-backed SLM forecasters for the legacy prototype.
 """
 import re
 import time
@@ -53,7 +53,7 @@ class OllamaLLMForecaster(BaseForecaster):
             except Exception as e:
                 last_error = e
                 if attempt < max_retries - 1:
-                    print(f"    [RETRY {attempt+1}] {type(e).__name__}, cho 3s...")
+                    print(f"    [RETRY {attempt+1}] {type(e).__name__}, waiting 3s...")
                     time.sleep(3)
                 else:
                     print(f"    [ERROR] {self.name} failed: {e}")
