@@ -38,6 +38,10 @@ class ExperimentConfig:
     pred_len: int = int(os.getenv("CHRONOLM_PRED_LEN", "3"))
     max_test_samples: int | None = None
     max_retries: int = 3
+    trace_every: int = int(os.getenv("CHRONOLM_TRACE_EVERY", "1"))
+    progress_every: int = int(os.getenv("CHRONOLM_PROGRESS_EVERY", "25"))
+    trace_history_points: int = int(os.getenv("CHRONOLM_TRACE_HISTORY_POINTS", "5"))
+    trace_output_chars: int = int(os.getenv("CHRONOLM_TRACE_OUTPUT_CHARS", "160"))
     temperature: float = 0.6
     max_tokens: int = 100
     request_timeout_s: int = 120
@@ -92,6 +96,23 @@ def clamp_to_recent_history(values: Iterable[float], history: list[float]) -> li
     lower = mean - 3 * std
     upper = mean + 3 * std
     return [max(lower, min(upper, value)) for value in values]
+
+
+def should_trace_sample(valid_sample_count: int, config: ExperimentConfig) -> bool:
+    return config.trace_every > 0 and valid_sample_count % config.trace_every == 0
+
+
+def format_history_tail(
+    history_times: list[float],
+    history_values: list[float],
+    n_points: int,
+) -> str:
+    tail = list(zip(history_times, history_values))[-n_points:]
+    return ", ".join(f"{time_value:.2f}h={value:.2f}" for time_value, value in tail)
+
+
+def format_values(values: Iterable[float], digits: int = 3) -> str:
+    return "[" + ", ".join(f"{value:.{digits}f}" for value in values) + "]"
 
 
 def call_llm(
@@ -216,6 +237,7 @@ def run(config: ExperimentConfig) -> None:
         total_predictions = 0
         fallback_count = 0
         detail_rows: list[dict] = []
+        valid_sample_count = 0
 
         for sample_index in range(n_samples):
             sample = test_dataset[sample_index]
@@ -265,6 +287,8 @@ def run(config: ExperimentConfig) -> None:
             if n_forecast == 0:
                 continue
 
+            valid_sample_count += 1
+            trace_sample = should_trace_sample(valid_sample_count, config)
             system_prompt, user_prompt = build_prompt(
                 variable_name,
                 n_forecast,
@@ -273,46 +297,99 @@ def run(config: ExperimentConfig) -> None:
 
             predictions_raw: list[float] | None = None
             raw_output = ""
+            request_start = time.time()
+            if trace_sample:
+                logger.info(
+                    "    [INPUT] sample=%s/%s valid=%s patient=%s variable=%s "
+                    "history_n=%s target_n=%s history_tail=%s",
+                    sample_index + 1,
+                    n_samples,
+                    valid_sample_count,
+                    sample.key,
+                    variable_name,
+                    len(history_raw),
+                    n_forecast,
+                    format_history_tail(
+                        history_times,
+                        history_raw,
+                        config.trace_history_points,
+                    ),
+                )
+
             for attempt in range(config.max_retries):
+                if trace_sample:
+                    logger.info(
+                        "    [CALL] sample=%s patient=%s attempt=%s/%s "
+                        "forecast_n=%s prompt_chars=%s",
+                        sample_index + 1,
+                        sample.key,
+                        attempt + 1,
+                        config.max_retries,
+                        n_forecast,
+                        len(system_prompt),
+                    )
+
                 raw_output = call_llm(config, user_prompt, system_prompt, logger)
                 if not raw_output:
+                    if trace_sample:
+                        logger.info(
+                            "    [OUTPUT] sample=%s patient=%s attempt=%s empty response",
+                            sample_index + 1,
+                            sample.key,
+                            attempt + 1,
+                        )
                     time.sleep(2)
                     continue
 
-                should_log_sample = sample_index < 3 or sample_index % 200 == 0
-                if should_log_sample:
+                if trace_sample:
                     logger.info(
-                        "    [LOG] Patient=%s, variable=%s, attempt=%s",
+                        "    [OUTPUT] sample=%s patient=%s attempt=%s raw=%r",
+                        sample_index + 1,
                         sample.key,
-                        variable_name,
                         attempt + 1,
+                        raw_output[: config.trace_output_chars],
                     )
-                    logger.info(
-                        "    [INPUT] %s observations, %s chars",
-                        len(history_raw),
-                        len(system_prompt),
-                    )
-                    logger.info("    [PROMPT] ...%s", system_prompt[-200:])
-                    logger.info("    [OUTPUT] %s", raw_output[:200])
 
                 predictions_raw = parse_numbers(raw_output, n_forecast)
                 if predictions_raw is not None:
-                    if should_log_sample:
-                        logger.info("    [PARSED] %s", predictions_raw)
+                    if trace_sample:
+                        logger.info(
+                            "    [PARSE] sample=%s patient=%s parsed_raw=%s",
+                            sample_index + 1,
+                            sample.key,
+                            format_values(predictions_raw),
+                        )
                     break
+                if trace_sample:
+                    logger.info(
+                        "    [PARSE] sample=%s patient=%s failed to parse enough numbers",
+                        sample_index + 1,
+                        sample.key,
+                    )
 
             if predictions_raw is None:
                 predictions_raw = [history_raw[-1]] * n_forecast
                 fallback_count += 1
-                if fallback_count <= 5:
+                if trace_sample or fallback_count <= 5:
                     logger.info(
                         "    [FALLBACK] Patient=%s, output=%r",
                         sample.key,
                         raw_output[:100],
                     )
 
+            unclamped_predictions_raw = list(predictions_raw)
             predictions_raw = clamp_to_recent_history(predictions_raw, history_raw)
+            if trace_sample and predictions_raw != unclamped_predictions_raw:
+                logger.info(
+                    "    [CLAMP] sample=%s patient=%s raw=%s clamped=%s",
+                    sample_index + 1,
+                    sample.key,
+                    format_values(unclamped_predictions_raw),
+                    format_values(predictions_raw),
+                )
 
+            sample_scaled_errors = []
+            sample_raw_errors = []
             for step_index in range(n_forecast):
                 predicted_scaled = raw_to_scaled(
                     predictions_raw[step_index],
@@ -322,7 +399,10 @@ def run(config: ExperimentConfig) -> None:
 
                 mae_scaled.append(scaled_error)
                 mse_scaled.append((actual_scaled[step_index] - predicted_scaled) ** 2)
-                mae_raw.append(abs(actual_raw[step_index] - predictions_raw[step_index]))
+                raw_error = abs(actual_raw[step_index] - predictions_raw[step_index])
+                mae_raw.append(raw_error)
+                sample_scaled_errors.append(scaled_error)
+                sample_raw_errors.append(raw_error)
 
                 detail_rows.append(
                     {
@@ -338,15 +418,35 @@ def run(config: ExperimentConfig) -> None:
                 )
                 total_predictions += 1
 
-            if (sample_index + 1) % 50 == 0 or (sample_index + 1) == n_samples:
+            if trace_sample:
+                logger.info(
+                    "    [SCORE] sample=%s patient=%s actual_raw=%s predicted_raw=%s "
+                    "mae_scaled=%.4f mae_raw=%.4f latency=%.1fs",
+                    sample_index + 1,
+                    sample.key,
+                    format_values(actual_raw),
+                    format_values(predictions_raw),
+                    float(np.mean(sample_scaled_errors)),
+                    float(np.mean(sample_raw_errors)),
+                    time.time() - request_start,
+                )
+
+            if (
+                (sample_index + 1) % config.progress_every == 0
+                or (sample_index + 1) == n_samples
+            ):
                 elapsed = time.time() - variable_start
                 speed = (sample_index + 1) / elapsed if elapsed > 0 else 0
                 remaining = (n_samples - sample_index - 1) / speed if speed > 0 else 0
                 logger.info(
-                    "  [%s] %s/%s (%.0fs elapsed, ~%.0fs remaining)",
+                    "  [%s] scanned=%s/%s valid=%s predictions=%s fallback=%s "
+                    "(%.0fs elapsed, ~%.0fs remaining)",
                     variable_name,
                     sample_index + 1,
                     n_samples,
+                    valid_sample_count,
+                    total_predictions,
+                    fallback_count,
                     elapsed,
                     remaining,
                 )

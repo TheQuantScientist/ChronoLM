@@ -62,6 +62,23 @@ python run_p12_gemma.py
 The first run may download and preprocess PhysioNet 2012 into `~/.tsdm/`.
 Later runs reuse the cache.
 
+For a long run under `nohup`:
+
+```bash
+nohup python run_p12_gemma.py > gemma_run.log 2>&1 &
+tail -f gemma_run.log
+```
+
+The runner prints compact `INPUT -> CALL -> OUTPUT -> PARSE/SCORE` traces for
+valid forecast samples. By default it traces every valid sample. To reduce log
+volume, increase `CHRONOLM_TRACE_EVERY`:
+
+```bash
+export CHRONOLM_TRACE_EVERY=10
+export CHRONOLM_PROGRESS_EVERY=25
+python run_p12_gemma.py
+```
+
 ## Diagnostic Scripts
 
 Run these from the repository root:
