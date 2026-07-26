@@ -3,6 +3,8 @@ venv/
 /data/
 result/ 
 .venv/
+.env
+.env.local
 *.csv 
 *.log 
 __pycache__/ 

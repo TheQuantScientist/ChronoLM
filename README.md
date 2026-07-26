@@ -12,7 +12,7 @@ with zero-shot LLM forecasts through an OpenAI-compatible API.
 | `APN/` | Upstream APN implementation and baseline training scripts. Keep this close to upstream. |
 | `APN/data/` | APN data-loader source code and vendored `tsdm` code. This is source code, not raw data. |
 | `src/chronolm/` | Active ChronoLM package code. |
-| `run_p12_gemma.py` | Root-level entry point for the main Gemma-vs-APN experiment. |
+| `run_p12_llm.py` | Root-level entry point for the main LLM-vs-APN experiment. |
 | `scripts/` | Small diagnostic scripts for APN P12 data inspection. |
 | `legacy/ollama_sliding_window/` | Older processed-CSV/Ollama prototype code, kept only for reference. |
 
@@ -40,23 +40,25 @@ pip install torch pandas numpy scikit-learn requests pyarrow
 
 ## Configure The LLM Endpoint
 
-The Gemma experiment reads these environment variables:
+The experiment reads these environment variables:
 
 ```bash
 export CHRONOLM_API_URL="https://your-server/v1/chat/completions"
-export CHRONOLM_MODEL_ID="google/gemma-3-4b-it"
+export CHRONOLM_MODEL_ID="Qwen/Qwen3.5-4B"
 export CHRONOLM_API_KEY="your-api-key"
+export CHRONOLM_ENABLE_THINKING=false
 ```
 
-Defaults are still present in the code for the current internal LiteLLM proxy,
-but environment variables should be preferred for new runs.
+Defaults are still present in the code for the current internal LiteLLM proxy
+and Qwen model, but environment variables should be preferred for model sweeps.
+Qwen thinking mode is off by default for cleaner numeric forecasting output.
 
 ## Run The Main Experiment
 
 Run from the repository root:
 
 ```bash
-python run_p12_gemma.py
+python run_p12_llm.py
 ```
 
 The first run may download and preprocess PhysioNet 2012 into `~/.tsdm/`.
@@ -65,8 +67,8 @@ Later runs reuse the cache.
 For a long run under `nohup`:
 
 ```bash
-nohup python run_p12_gemma.py > gemma_run.log 2>&1 &
-tail -f gemma_run.log
+nohup python run_p12_llm.py > llm_run.log 2>&1 &
+tail -f llm_run.log
 ```
 
 The runner prints compact `INPUT -> CALL -> OUTPUT -> PARSE/SCORE` traces for
@@ -76,7 +78,31 @@ volume, increase `CHRONOLM_TRACE_EVERY`:
 ```bash
 export CHRONOLM_TRACE_EVERY=10
 export CHRONOLM_PROGRESS_EVERY=25
-python run_p12_gemma.py
+export CHRONOLM_MAX_RETRIES=6
+python run_p12_llm.py
+```
+
+To run a different model, set `CHRONOLM_MODEL_ID`. Output filenames are derived
+from the model id by default, or from `CHRONOLM_RUN_NAME` when provided.
+
+```bash
+export CHRONOLM_MODEL_ID="Qwen/Qwen3.5-4B"
+export CHRONOLM_RUN_NAME="qwen3_5_4b_temp06"
+export CHRONOLM_ENABLE_THINKING=false
+nohup python run_p12_llm.py > qwen3_5_4b_run.log 2>&1 &
+```
+
+For OpenAI GPT-5 mini, use the dedicated launcher. It reads the key from
+`OPENAI_API_KEY` in the shell or from a local `.env` file, and defaults to
+`reasoning_effort=minimal`, low verbosity, and a 64-token output cap for short
+numeric outputs. GPT-5 mini currently rejects non-default temperature values, so
+the launcher omits temperature. It also uses a GPT-only clinical prompt focused
+on conditional expected values to reduce squared-error blowups.
+
+```bash
+export OPENAI_API_KEY="your-openai-key"
+nohup python run_p12_gpt5_mini.py > gpt5_mini_run.log 2>&1 &
+tail -f gpt5_mini_run.log
 ```
 
 ## Diagnostic Scripts
@@ -91,14 +117,14 @@ python scripts/p12_debug_splits.py
 
 ## Outputs
 
-The Gemma runner writes:
+The runner writes:
 
 | File | Purpose |
 |------|---------|
-| `Gemma_temp06_P12_Results.csv` | Summary MAE/MSE by variable. |
-| `Gemma_temp06_P12_Checkpoint.csv` | Per-variable checkpoint for resuming interrupted runs. |
-| `Gemma_temp06_P12_DetailLog.csv` | Per-prediction actual vs predicted values. |
-| `gemma_temp06_debug.log` | Prompt, response, fallback, and progress logging. |
+| `<run_name>_P12_Results.csv` | Summary MAE/MSE by variable. |
+| `<run_name>_P12_Checkpoint.csv` | Per-variable checkpoint for resuming interrupted runs. |
+| `<run_name>_P12_DetailLog.csv` | Per-prediction actual vs predicted values. |
+| `<run_name>_debug.log` | Prompt, response, fallback, and progress logging. |
 
 Generated CSV and log files are ignored by git.
 
