@@ -1,8 +1,4 @@
-"""Compatibility entry point for older Gemma commands.
-
-Prefer `run_p12_llm.py` for new runs. This file remains so existing nohup
-commands and notes do not break.
-"""
+"""Repository-root entry point for LLM forecasting on APN benchmark datasets."""
 
 from pathlib import Path
 import sys
