@@ -1,198 +1,121 @@
 # ChronoLM
 
-ChronoLM compares small language models against APN on irregular clinical time
-series forecasting. The current benchmark uses the APN PhysioNet 2012 (P12)
-data pipeline, split, scaling, and metrics, then replaces the trained APN model
-with zero-shot LLM forecasts through an OpenAI-compatible API.
+ChronoLM is now a compact benchmark workspace for asking a sharper question:
+how far can simple history anchors go on irregular multivariate time-series
+forecasting when evaluated with the same APN data splits and scaled metrics?
 
-## Repository Layout
+The upstream APN repository is kept under `APN/` and remains the source of truth
+for trained APN and paper-baseline model settings. ChronoLM code outside that
+folder only contains our anchor-only runner and orchestration utilities.
+
+## Layout
 
 | Path | Purpose |
-|------|---------|
-| `APN/` | Upstream APN implementation and baseline training scripts. Keep this close to upstream. |
-| `APN/data/` | APN data-loader source code and vendored `tsdm` code. This is source code, not raw data. |
-| `src/chronolm/` | Active ChronoLM package code. |
-| `run_apn_llm.py` | Generic root-level entry point for supported APN benchmark datasets. |
-| `run_p12_llm.py` | Compatibility entry point for the P12 LLM-vs-APN experiment. |
-| `run_ushcn_gpt5_mini.py` | GPT-5 mini entry point for the APN USHCN benchmark. |
-| `run_humanactivity_gpt5_mini.py` | GPT-5 mini entry point for the APN HumanActivity benchmark. |
-| `scripts/` | Small diagnostic scripts for APN P12 data inspection. |
-| `legacy/ollama_sliding_window/` | Older processed-CSV/Ollama prototype code, kept only for reference. |
+|---|---|
+| `APN/` | Upstream APN implementation, datasets, configs, and model scripts. |
+| `src/chronolm/experiments/anchor_baseline.py` | Deterministic anchor-only runner using APN data loaders and metrics. |
+| `run_anchor_baseline.py` | Root-level launcher for anchor runs on P12, USHCN, and HumanActivity. |
+| `run_apn_paper_models.py` | Root-level wrapper for APN paper model scripts. |
+| `scripts/compute_global_metrics.py` | Utility for APN-style global MAE/MSE from detail logs. |
+| `apn_benchmark_results.md` | Current paper-table results with our anchor-only row. |
 
-P12 and USHCN raw dataset caches live outside the repo:
-
-```bash
-~/.tsdm/
-```
-
-HumanActivity follows APN's cache location by default:
-
-```bash
-APN/storage/datasets/HumanActivity
-```
+Generated logs, CSVs, checkpoints, and local environments are ignored by git.
 
 ## Setup
 
-Python 3.11 is recommended because APN was tested against that version.
+APN recommends Python 3.11.13 and PyTorch 2.6.0+cu124.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r APN/requirements.txt
+pip install -e .
 ```
 
-If the environment is missing common packages, install:
+Public datasets are prepared by APN on first use:
+
+| Dataset | Cache |
+|---|---|
+| P12 / PhysioNet 2012 | `~/.tsdm/` |
+| USHCN | `~/.tsdm/` |
+| HumanActivity | `APN/storage/datasets/HumanActivity` |
+
+MIMIC requires credentialed access. Follow `APN/README.md` and place
+`complete_tensor.csv` under `~/.tsdm/rawdata/MIMIC_III_DeBrouwer2019/`.
+
+## Run Anchor Baselines
+
+Run all currently supported anchor datasets:
 
 ```bash
-pip install torch pandas numpy scikit-learn requests pyarrow
+python run_anchor_baseline.py --all
 ```
 
-## Configure The LLM Endpoint
-
-The experiment reads these environment variables:
+Run one dataset:
 
 ```bash
-export CHRONOLM_API_URL="https://your-server/v1/chat/completions"
-export CHRONOLM_MODEL_ID="Qwen/Qwen3.5-4B"
-export CHRONOLM_DATASET="P12"
-export CHRONOLM_API_KEY="your-api-key"
-export CHRONOLM_ENABLE_THINKING=false
+python run_anchor_baseline.py --dataset P12
+python run_anchor_baseline.py --dataset USHCN
+python run_anchor_baseline.py --dataset HumanActivity
 ```
 
-Defaults are still present in the code for the current internal LiteLLM proxy
-and Qwen model, but environment variables should be preferred for model sweeps.
-Qwen thinking mode is off by default for cleaner numeric forecasting output.
-Supported APN datasets are currently `P12`, `USHCN`, and `HumanActivity`.
-
-## Run The Main Experiment
-
-Run from the repository root:
+Cheap smoke test:
 
 ```bash
-python run_apn_llm.py
+python run_anchor_baseline.py --dataset USHCN --max-test-samples 20 --trace-every 5
 ```
 
-The first run may download and preprocess PhysioNet 2012 into `~/.tsdm/`.
-Later runs reuse the cache.
-
-For a long run under `nohup`:
-
-```bash
-nohup python run_apn_llm.py > llm_run.log 2>&1 &
-tail -f llm_run.log
-```
-
-The runner prints compact `INPUT -> CALL -> OUTPUT -> PARSE/SCORE` traces for
-valid forecast samples. By default it traces every valid sample. To reduce log
-volume, increase `CHRONOLM_TRACE_EVERY`:
-
-```bash
-export CHRONOLM_TRACE_EVERY=10
-export CHRONOLM_PROGRESS_EVERY=25
-export CHRONOLM_MAX_RETRIES=6
-python run_apn_llm.py
-```
-
-To run a different model, set `CHRONOLM_MODEL_ID`. Output filenames are derived
-from the model id by default, or from `CHRONOLM_RUN_NAME` when provided.
-
-```bash
-export CHRONOLM_MODEL_ID="Qwen/Qwen3.5-4B"
-export CHRONOLM_DATASET="P12"
-export CHRONOLM_RUN_NAME="qwen3_5_4b_temp06"
-export CHRONOLM_ENABLE_THINKING=false
-nohup python run_apn_llm.py > qwen3_5_4b_run.log 2>&1 &
-```
-
-For GPT-5 mini on P12 through OpenRouter, use the dedicated launcher. It reads
-`OPENROUTER_API_KEY` from the shell or from a local `.env` file, omits
-temperature, uses OpenRouter's mandatory minimal reasoning, and applies a
-validation-calibrated clinical anchor prompt focused on APN-style scaled MSE.
-
-```bash
-export OPENROUTER_API_KEY="your-openrouter-key"
-nohup python run_p12_gpt5_mini.py > gpt5_mini_p12_calibrated_anchor_mse_run.log 2>&1 &
-tail -f gpt5_mini_p12_calibrated_anchor_mse_run.log
-```
-
-For P12 ablations, use the separate launcher. It writes every artifact under
-`ablation_results/p12/<mode>/` and writes a compact summary to
-`ablation_results/p12/ablation_summary.csv` after completed runs.
-
-```bash
-python run_p12_ablation.py --dry-run
-nohup python run_p12_ablation.py --mode anchor_only > p12_ablation_anchor_only.log 2>&1 &
-nohup python run_p12_ablation.py --mode gpt_only > p12_ablation_gpt_only.log 2>&1 &
-nohup python run_p12_ablation.py --mode anchor_gpt_no_context > p12_ablation_no_context.log 2>&1 &
-nohup python run_p12_ablation.py --mode anchor_gpt_generic_prompt > p12_ablation_generic_prompt.log 2>&1 &
-```
-
-Use `--all` only when you intentionally want to run the full ablation sequence.
-For a cheap smoke test, add `--max-test-samples 20`.
-
-For OpenAI GPT-5 mini on USHCN, the dedicated launcher uses an anchor-assisted
-USHCN prompt with exact target timestamps and observed station history:
-
-```bash
-nohup python run_ushcn_gpt5_mini.py > gpt5_mini_ushcn_anchor_blend_mse_run.log 2>&1 &
-tail -f gpt5_mini_ushcn_anchor_blend_mse_run.log
-```
-
-This follows APN's USHCN setup: `seq_len=150`, `pred_len=3`, and 5 climate
-channels. USHCN is public and will be downloaded into `~/.tsdm` on first use.
-Outputs are named `gpt5_mini_ushcn_anchor_blend_mse_USHCN_*` by default.
-
-For OpenAI GPT-5 mini on HumanActivity, the dedicated launcher uses APN's
-`seq_len=3000`, `pred_len=300`, 12 accelerometer channels, and a
-history-anchor prompt tuned for short-horizon wearable motion:
-
-```bash
-nohup python run_humanactivity_gpt5_mini.py > gpt5_mini_humanactivity_ema_anchor_mse_run.log 2>&1 &
-tail -f gpt5_mini_humanactivity_ema_anchor_mse_run.log
-```
-
-HumanActivity is public and will be downloaded into
-`APN/storage/datasets/HumanActivity` on first use. Outputs are named
-`gpt5_mini_humanactivity_ema_anchor_mse_HumanActivity_*` by default.
-
-## Diagnostic Scripts
-
-Run these from the repository root:
-
-```bash
-python scripts/p12_target_coverage.py
-python scripts/p12_obs_count.py
-python scripts/p12_debug_splits.py
-```
-
-To compute APN-style global masked MAE/MSE from a ChronoLM detail log:
-
-```bash
-python scripts/compute_global_metrics.py gpt5_mini_P12_DetailLog.csv
-python scripts/compute_global_metrics.py gpt5_mini_USHCN_DetailLog.csv
-```
-
-## Outputs
-
-The runner writes:
+Outputs go under `anchor_results/<dataset>/` and include:
 
 | File | Purpose |
-|------|---------|
-| `<run_name>_<dataset>_Results.csv` | Summary MAE/MSE by variable. |
-| `<run_name>_<dataset>_Checkpoint.csv` | Per-variable checkpoint for resuming interrupted runs. |
-| `<run_name>_<dataset>_DetailLog.csv` | Per-prediction actual vs predicted values. |
-| `<run_name>_<dataset>_debug.log` | Prompt, response, fallback, and progress logging. |
+|---|---|
+| `*_Calibration.csv` | Per-variable anchor method, fitted shrinkage, source, and rationale. |
+| `*_Results.csv` | Per-variable scaled MAE/MSE. |
+| `*_Checkpoint.csv` | Per-variable resume checkpoint. |
+| `*_DetailLog.csv` | Per-target actual, prediction, and anchor values. |
+| `*_debug.log` | Progress and compact trace logging. |
+| `anchor_results/anchor_summary.csv` | APN-style global summary across completed datasets. |
 
-Generated CSV and log files are ignored by git.
+The anchor runner does not store per-variable test-set constants. P12 chooses
+the anchor method and shrinkage on APN train+validation labels, then evaluates
+once on test. USHCN chooses seasonal/sparse anchors from observed-history
+structure, and HumanActivity uses a horizon-based EMA rule.
 
-## APN Baseline
-
-APN baseline training still uses the upstream scripts:
+Compute APN-style metrics from any detail log:
 
 ```bash
-cd APN
-chmod +x ./scripts/APN/P12.sh
-./scripts/APN/P12.sh
+python scripts/compute_global_metrics.py anchor_results/p12/anchor_only_p12_P12_DetailLog.csv
 ```
 
-That path is intentionally separate from the ChronoLM runner.
+## Run APN Paper Models
+
+List the APN paper-script matrix:
+
+```bash
+python run_apn_paper_models.py --list
+```
+
+Dry-run the exact APN commands from the root:
+
+```bash
+python run_apn_paper_models.py --model APN --dataset P12
+```
+
+Execute a script:
+
+```bash
+python run_apn_paper_models.py --model APN --dataset P12 --execute
+```
+
+Run every paper-table model on the public datasets:
+
+```bash
+python run_apn_paper_models.py \
+  --dataset HumanActivity,USHCN,P12 \
+  --execute \
+  --continue-on-error
+```
+
+The wrapper does not rewrite APN hyperparameters or GPU ids. It runs each
+`APN/scripts/<model>/<dataset>.sh` with `cwd=APN`, creates `APN/logs/`, and
+writes wrapper logs under `apn_model_runs/`.

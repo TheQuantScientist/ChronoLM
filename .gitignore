@@ -9,3 +9,5 @@ result/
 *.log 
 __pycache__/ 
 *.pyc 
+anchor_results/
+apn_model_runs/

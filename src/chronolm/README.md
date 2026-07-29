@@ -1,13 +1,12 @@
 # ChronoLM Package
 
-This package contains active project code that is not part of upstream APN.
+Active code outside upstream APN is intentionally small:
 
-- `experiments/apn_llm.py`: LLM zero-shot forecasting on supported APN benchmark tasks.
-- `tools/`: small APN P12 inspection modules used while validating the experiment.
-- `apn.py`: path helper that allows APN imports without changing directories.
+- `experiments/anchor_baseline.py`: anchor-only forecasting with APN data splits and metrics.
+- `apn.py`: path helper for importing APN modules without changing directories.
 
-Run the main experiment from the repository root:
+Run from the repository root:
 
 ```bash
-python run_apn_llm.py
+python run_anchor_baseline.py --dataset P12
 ```

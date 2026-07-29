@@ -1,7 +1,7 @@
 [project]
 name = "chronolm"
 version = "0.1.0"
-description = "Small language model experiments for irregular clinical time series forecasting."
+description = "Anchor baselines and APN reproduction utilities for irregular time-series forecasting."
 requires-python = ">=3.10"
 
 [tool.setuptools]

@@ -14,6 +14,6 @@
 | tPatchGNN | 0.0443±0.0009 | 0.1247±0.0031 | 0.1885±0.0403 | 0.3084±0.0479 | 0.3133±0.0053 | 0.3697±0.0049 | 0.4431±0.0115 | 0.4077±0.0088 |
 | GraFITi | 0.0437±0.0005 | 0.1221±0.0017 | 0.1691±0.0093 | 0.2777±0.0248 | 0.3075±0.0015 | 0.3637±0.0036 | 0.4359±0.0455 | 0.4142±0.0297 |
 | APN (Ours) | 0.0421±0.0001 | 0.1159±0.0006 | 0.1590±0.0137 | 0.2611±0.0167 | 0.3093±0.0011 | 0.3650±0.0026 | 0.4292±0.0027 | 0.4016±0.0016 |
-| GPT-5-Mini (anchor) | 0.0419 | 0.1147 | 0.1515 | 0.2152 | 0.2997 | 0.3575 |  |  |
+| Anchor | 0.0420 | 0.1148 | 0.1566 | 0.2187 | 0.2980 | 0.3566 |  |  |
 
-GPT-5-Mini anchor values are APN-style global masked metrics from the current HumanActivity, USHCN, and PhysioNet/P12 runs.
+Anchor values are APN-style global masked metrics from the current HumanActivity, USHCN, and PhysioNet/P12 runs.
