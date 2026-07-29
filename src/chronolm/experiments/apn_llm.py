@@ -39,13 +39,80 @@ DATASET_DEFAULTS = {
 ANCHOR_BLEND_PROMPT_STYLES = {
     "gpt_climate_anchor_blend_mse",
     "gpt_clinical_anchor_blend_mse",
+    "gpt_clinical_calibrated_anchor_mse",
     "gpt_activity_anchor_blend_mse",
+}
+
+ABLATION_MODES = {
+    "default",
+    "anchor_gpt",
+    "anchor_only",
+    "gpt_only",
+    "anchor_gpt_no_context",
+    "anchor_gpt_generic_prompt",
 }
 
 APN_BASELINES = {
     "HumanActivity": {"MAE": 0.1159, "MSE": 0.0421},
-    "P12": {"MAE": 0.3762, "MSE": 0.2936},
+    "P12": {"MAE": 0.3650, "MSE": 0.3093},
     "USHCN": {"MAE": 0.2611, "MSE": 0.1590},
+}
+
+P12_CONTEXT_COLUMNS = {
+    "pH",
+    "PaCO2",
+    "PaO2",
+    "FiO2",
+    "DiasABP",
+    "HR",
+    "MAP",
+    "SysABP",
+    "Temp",
+    "GCS",
+    "Urine",
+    "NIDiasABP",
+    "NIMAP",
+    "NISysABP",
+    "RespRate",
+}
+
+P12_CALIBRATED_ANCHOR_PARAMS = {
+    "pH": ("ema08", 0.71),
+    "PaCO2": ("mean2", 0.84),
+    "PaO2": ("trim5", 0.74),
+    "FiO2": ("ema07", 0.78),
+    "DiasABP": ("ema07", 0.77),
+    "HR": ("ema06", 0.91),
+    "MAP": ("ema03", 0.91),
+    "SysABP": ("ema04", 0.90),
+    "Temp": ("ema06", 0.86),
+    "GCS": ("ema08", 0.96),
+    "Urine": ("ema05", 0.72),
+    "Weight": ("last", 1.00),
+    "HCT": ("last", 0.77),
+    "BUN": ("last", 1.04),
+    "Creatinine": ("last", 0.96),
+    "Glucose": ("mean2", 0.45),
+    "HCO3": ("last", 0.86),
+    "Mg": ("ema07", 0.78),
+    "Platelets": ("last", 0.97),
+    "K": ("ema06", 0.78),
+    "Na": ("ema08", 0.84),
+    "WBC": ("last", 0.82),
+    "NIDiasABP": ("ema03", 0.88),
+    "NIMAP": ("ema03", 0.90),
+    "NISysABP": ("ema03", 0.94),
+    "RespRate": ("ema02", 0.96),
+    "ALP": ("last", 0.93),
+    "ALT": ("last", 0.85),
+    "AST": ("last", 0.80),
+    "Bilirubin": ("last", 0.98),
+    "SaO2": ("ema03", 0.81),
+    "Lactate": ("last", 0.97),
+    "Albumin": ("ema02", 0.33),
+    "TroponinT": ("ema02", 0.86),
+    "Cholesterol": ("ema04", 0.89),
+    "TroponinI": ("last", 1.20),
 }
 
 
@@ -140,7 +207,9 @@ class ExperimentConfig:
     anchor_blend_weight: float = field(
         default_factory=lambda: env_float("CHRONOLM_ANCHOR_BLEND_WEIGHT", 0.9)
     )
+    ablation_mode: str = field(default_factory=lambda: os.getenv("CHRONOLM_ABLATION_MODE", "default"))
     request_timeout_s: int = field(default_factory=lambda: env_int("CHRONOLM_REQUEST_TIMEOUT_S", 120))
+    output_dir: Path | None = field(default_factory=lambda: env_optional_path("CHRONOLM_OUTPUT_DIR"))
     output_csv: Path | None = field(default_factory=lambda: env_optional_path("CHRONOLM_OUTPUT_CSV"))
     checkpoint_csv: Path | None = field(default_factory=lambda: env_optional_path("CHRONOLM_CHECKPOINT_CSV"))
     detail_log_csv: Path | None = field(default_factory=lambda: env_optional_path("CHRONOLM_DETAIL_LOG_CSV"))
@@ -148,8 +217,14 @@ class ExperimentConfig:
 
     def __post_init__(self) -> None:
         dataset_name = canonical_dataset_name(self.dataset_name)
+        ablation_mode = self.ablation_mode.strip().lower()
+        if ablation_mode not in ABLATION_MODES:
+            supported = ", ".join(sorted(ABLATION_MODES))
+            raise ValueError(f"Unsupported ablation mode {self.ablation_mode!r}. Use one of: {supported}")
+
         defaults = DATASET_DEFAULTS[dataset_name]
         object.__setattr__(self, "dataset_name", dataset_name)
+        object.__setattr__(self, "ablation_mode", ablation_mode)
         if "CHRONOLM_SEQ_LEN" not in os.environ:
             object.__setattr__(self, "seq_len", defaults["seq_len"])
         if "CHRONOLM_PRED_LEN" not in os.environ:
@@ -157,25 +232,35 @@ class ExperimentConfig:
 
         run_name = self.run_name or slugify_model_name(self.model_id)
         object.__setattr__(self, "run_name", run_name)
+        output_dir = self.output_dir
+        if output_dir is not None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        def default_path(path: Path | None, suffix: str) -> Path:
+            if path is not None:
+                return path
+            filename = f"{run_name}_{dataset_name}_{suffix}"
+            return output_dir / filename if output_dir is not None else Path(filename)
+
         object.__setattr__(
             self,
             "output_csv",
-            self.output_csv or Path(f"{run_name}_{dataset_name}_Results.csv"),
+            default_path(self.output_csv, "Results.csv"),
         )
         object.__setattr__(
             self,
             "checkpoint_csv",
-            self.checkpoint_csv or Path(f"{run_name}_{dataset_name}_Checkpoint.csv"),
+            default_path(self.checkpoint_csv, "Checkpoint.csv"),
         )
         object.__setattr__(
             self,
             "detail_log_csv",
-            self.detail_log_csv or Path(f"{run_name}_{dataset_name}_DetailLog.csv"),
+            default_path(self.detail_log_csv, "DetailLog.csv"),
         )
         object.__setattr__(
             self,
             "debug_log",
-            self.debug_log or Path(f"{run_name}_{dataset_name}_debug.log"),
+            default_path(self.debug_log, "debug.log"),
         )
 
 
@@ -367,58 +452,122 @@ def build_p12_forecast_anchors(
     ]
 
 
+def p12_scaled_anchor_base(method: str, history_scaled: list[float]) -> float:
+    values = np.asarray(history_scaled, dtype=float)
+
+    if method == "last":
+        return float(values[-1])
+
+    if method.startswith("mean"):
+        count = min(int(method[-1]), len(values))
+        return float(np.mean(values[-count:]))
+
+    if method.startswith("trim"):
+        count = min(int(method[-1]), len(values))
+        recent = np.sort(values[-count:])
+        if len(recent) >= 3:
+            return float(np.mean(recent[1:-1]))
+        return float(np.mean(recent))
+
+    if method.startswith("ema"):
+        alpha = int(method[-2:]) / 10.0
+        anchor = float(values[0])
+        for value in values[1:]:
+            anchor = alpha * float(value) + (1.0 - alpha) * anchor
+        return anchor
+
+    raise ValueError(f"Unknown P12 anchor method: {method}")
+
+
+def build_p12_calibrated_forecast_anchors(
+    variable_name: str,
+    history_scaled: list[float],
+    target_times: list[float],
+    benchmark: "BenchmarkData",
+    encoder_index: int,
+) -> list[dict[str, float | int | str]]:
+    method, shrink_beta = P12_CALIBRATED_ANCHOR_PARAMS.get(
+        variable_name,
+        ("ema04", 0.89),
+    )
+    base_scaled = p12_scaled_anchor_base(method, history_scaled)
+    anchor_scaled = float(shrink_beta * base_scaled)
+    anchor_raw = benchmark.scaled_to_raw(anchor_scaled, encoder_index)
+
+    return [
+        {
+            "step": step_index,
+            "target_time": round(float(target_time), 2),
+            "recommended_anchor": round(float(anchor_raw), 4),
+            "recommended_anchor_scaled": round(anchor_scaled, 6),
+            "base_scaled": round(base_scaled, 6),
+            "method": method,
+            "shrink_beta": round(float(shrink_beta), 3),
+            "rule": "validation_calibrated_scaled_anchor",
+        }
+        for step_index, target_time in enumerate(target_times, start=1)
+    ]
+
+
+def build_p12_recent_multichannel_tail(
+    t_input: object,
+    x_input: object,
+    columns: list[str],
+    benchmark: "BenchmarkData",
+    max_rows: int = 8,
+) -> list[dict[str, object]]:
+    rows = []
+    start_index = max(0, len(t_input) - max_rows)
+    for row_index in range(start_index, len(t_input)):
+        values = {}
+        for column_index, column_name in enumerate(columns):
+            if column_name not in P12_CONTEXT_COLUMNS:
+                continue
+
+            value = x_input[row_index, column_index]
+            if not bool(value.isnan().item()):
+                encoder_index = benchmark.encoder_index_by_column[column_name]
+                raw_value = benchmark.scaled_to_raw(float(value.item()), encoder_index)
+                values[column_name] = round_prompt_value(raw_value, benchmark.name)
+
+        if values:
+            timestamp = benchmark.time_to_prompt(float(t_input[row_index].item()))
+            rows.append(
+                {
+                    "timestamp": benchmark.format_timestamp(timestamp),
+                    "values": values,
+                }
+            )
+
+    return rows
+
+
 def build_activity_forecast_anchors(
     history_times: list[float],
     history_values: list[float],
     target_times: list[float],
 ) -> list[dict[str, float | int | str]]:
-    recent_count = min(12, len(history_values))
-    recent_times = np.asarray(history_times[-recent_count:], dtype=float)
-    recent_values = np.asarray(history_values[-recent_count:], dtype=float)
+    alpha = 0.3
+    ema_value = float(history_values[0])
+    for history_value in history_values[1:]:
+        ema_value = alpha * float(history_value) + (1.0 - alpha) * ema_value
 
-    last_value = float(recent_values[-1])
+    recent_values = history_values[-5:]
     recent_mean = float(np.mean(recent_values))
     recent_std = float(np.std(recent_values))
-    recent_low = float(np.min(recent_values))
-    recent_high = float(np.max(recent_values))
-    time_span = float(np.ptp(recent_times))
-
-    slope = 0.0
-    intercept = last_value
-    if len(recent_values) >= 3 and time_span > 1e-9:
-        weights = np.linspace(0.55, 1.0, len(recent_values))
-        slope, intercept = np.polyfit(recent_times, recent_values, 1, w=weights)
-
-    diffs = np.diff(recent_values)
-    directional_consistency = 0.0
-    if len(diffs) > 0 and np.any(np.abs(diffs) > 1e-9):
-        directional_consistency = abs(float(np.mean(np.sign(diffs[np.abs(diffs) > 1e-9]))))
+    last_value = float(history_values[-1])
 
     anchors: list[dict[str, float | int | str]] = []
     for step_index, target_time in enumerate(target_times, start=1):
-        if recent_std < 0.05 or time_span <= 1e-9:
-            recommended = 0.9 * last_value + 0.1 * recent_mean
-            rule = "stable_persistence"
-        else:
-            trend_value = float(intercept + slope * target_time)
-            gap_ms = max(0.0, float(target_time) - float(recent_times[-1]))
-            horizon_fraction = min(1.0, gap_ms / 300.0)
-            trend_weight = 0.45 + 0.25 * directional_consistency - 0.15 * horizon_fraction
-            trend_weight = float(np.clip(trend_weight, 0.25, 0.70))
-            persistent_level = 0.8 * last_value + 0.2 * recent_mean
-            recommended = trend_weight * trend_value + (1.0 - trend_weight) * persistent_level
-            padding = max(0.08, 1.25 * recent_std)
-            recommended = float(
-                np.clip(recommended, recent_low - padding, recent_high + padding)
-            )
-            rule = "damped_velocity"
-
         anchors.append(
             {
                 "step": step_index,
                 "target_time": round(float(target_time), 1),
-                "recommended_anchor": round(float(recommended), 4),
-                "rule": rule,
+                "recommended_anchor": round(ema_value, 4),
+                "rule": "ema_level_alpha_0_3",
+                "last_value": round(last_value, 4),
+                "recent_mean5": round(recent_mean, 4),
+                "recent_std5": round(recent_std, 4),
             }
         )
 
@@ -648,6 +797,13 @@ def uses_openai_chat_api(config: ExperimentConfig) -> bool:
     )
 
 
+def uses_openrouter_chat_api(config: ExperimentConfig) -> bool:
+    return (
+        config.api_provider.strip().lower() == "openrouter"
+        or config.api_url.rstrip("/") == "https://openrouter.ai/api/v1/chat/completions"
+    )
+
+
 def call_llm(
     config: ExperimentConfig,
     user_prompt: str,
@@ -656,7 +812,8 @@ def call_llm(
 ) -> str:
     full_prompt = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
     openai_chat_api = uses_openai_chat_api(config)
-    if not config.enable_thinking and not openai_chat_api:
+    openrouter_chat_api = uses_openrouter_chat_api(config)
+    if not config.enable_thinking and not openai_chat_api and not openrouter_chat_api:
         full_prompt = f"/no_think\n{full_prompt}"
 
     payload = {
@@ -669,6 +826,17 @@ def call_llm(
             payload["reasoning_effort"] = config.reasoning_effort
         if config.verbosity:
             payload["verbosity"] = config.verbosity
+        if config.include_temperature:
+            payload["temperature"] = config.temperature
+    elif openrouter_chat_api:
+        payload["max_tokens"] = config.max_tokens
+        if not config.enable_thinking:
+            payload["reasoning"] = {
+                "effort": config.reasoning_effort or "minimal",
+                "exclude": True,
+            }
+        elif config.reasoning_effort:
+            payload["reasoning"] = {"effort": config.reasoning_effort}
         if config.include_temperature:
             payload["temperature"] = config.temperature
     else:
@@ -770,13 +938,54 @@ def build_prompt(
     value_label = "number" if n_forecast == 1 else "numbers"
     step_label = "next step" if n_forecast == 1 else f"next {n_forecast} steps"
 
+    if config.ablation_mode == "anchor_gpt_generic_prompt":
+        system_prompt = (
+            f"You are an irregular numerical time-series forecaster for {variable_name}.\n"
+            "Use the exact target_timestamps. They are known at inference time; only "
+            "the target values are hidden.\n"
+            "The forecast_anchors are computed only from observed history. Treat each "
+            "recommended_anchor as the low-MSE base forecast.\n"
+            "Use the same-channel history to make only small evidence-backed "
+            "adjustments when there is a clear trend or level shift. Avoid unsupported "
+            "spikes and avoid changing the anchor when evidence is weak.\n"
+            f"Output ONLY {n_forecast} {value_label} for the {step_label}, in target "
+            "timestamp order, comma separated. No text.\n\n"
+            f"{history_json}"
+        )
+        return system_prompt, "Forecast the target-timestamp values."
+
+    if (
+        config.ablation_mode == "anchor_gpt_no_context"
+        and config.prompt_style == "gpt_clinical_calibrated_anchor_mse"
+    ):
+        system_prompt = (
+            f"You are a healthcare time-series forecaster for {variable_name} using "
+            "validation-calibrated history anchors.\n"
+            "Use the exact target_timestamps. They are known at inference time; only "
+            "the target values are hidden.\n"
+            "Values in series and forecast_anchors are in the original clinical units. "
+            "The recommended_anchor is computed only from this patient's observed "
+            "same-variable history, using a validation-selected estimator in APN "
+            "standardized space and shrinkage toward the training population mean. "
+            "Treat it as the low-MSE base forecast.\n"
+            "Optimize MSE: stay close to the anchor when uncertain; move away only "
+            "when the same-variable history strongly supports a sustained trend or "
+            "regime change. Avoid chasing isolated outliers or inventing abrupt spikes.\n"
+            f"Output ONLY {n_forecast} {value_label} for the {step_label}, in target "
+            "timestamp order, comma separated. No text.\n\n"
+            f"{history_json}"
+        )
+        return system_prompt, "Forecast the target-timestamp clinical values."
+
     if config.prompt_style == "gpt_clinical_mse":
         system_prompt = (
             f"You are a healthcare time-series forecaster for {variable_name}.\n"
             "Use the exact target_timestamps. They are known at inference time; only "
             "the target values are hidden.\n"
             "Silently assess the history for trend, level shifts, irregular time gaps, "
-            "and clinically plausible sudden changes.\n"
+            "and clinically plausible sudden changes. Use recent_multichannel_tail "
+            "when present, but do not invent changes unsupported by the target "
+            "variable history.\n"
             "Predict the conditional expected next values, optimized for low squared "
             "error: avoid speculative spikes unless the recent evidence supports them.\n"
             f"Output ONLY {n_forecast} {value_label} for the {step_label}, comma "
@@ -798,6 +1007,31 @@ def build_prompt(
             "Optimize for low squared error: stay near the anchor when evidence is "
             "weak, and move away only when recent history strongly supports a trend or "
             "clinically plausible regime change.\n"
+            f"Output ONLY {n_forecast} {value_label} for the {step_label}, in target "
+            "timestamp order, comma separated. No text.\n\n"
+            f"{history_json}"
+        )
+        return system_prompt, "Forecast the target-timestamp clinical values."
+
+    if config.prompt_style == "gpt_clinical_calibrated_anchor_mse":
+        system_prompt = (
+            f"You are a healthcare time-series forecaster for {variable_name} using "
+            "validation-calibrated history anchors.\n"
+            "Use the exact target_timestamps. They are known at inference time; only "
+            "the target values are hidden.\n"
+            "Values in series and forecast_anchors are in the original clinical units. "
+            "The recommended_anchor is computed only from this patient's observed "
+            "history, using a validation-selected estimator in APN standardized space "
+            "and shrinkage toward the training population mean. Treat it as the "
+            "low-MSE base forecast.\n"
+            "Use recent_multichannel_tail only to make small evidence-backed "
+            "adjustments for clear physiologic regime changes, such as sustained "
+            "blood-pressure shifts, ventilation/oxygenation changes, urine output "
+            "bursts, or consistent vital-sign deterioration. Avoid chasing isolated "
+            "outliers or inventing abrupt spikes.\n"
+            "Optimize MSE: stay close to the anchor when uncertain; move away only "
+            "when the same variable history and multichannel clinical context strongly "
+            "support the same direction.\n"
             f"Output ONLY {n_forecast} {value_label} for the {step_label}, in target "
             "timestamp order, comma separated. No text.\n\n"
             f"{history_json}"
@@ -873,13 +1107,14 @@ def build_prompt(
             "Use exact target_timestamps. They are known at inference time; only "
             "target values are hidden.\n"
             "The forecast_anchors are computed only from same-channel observed "
-            "history using conservative persistence and damped recent velocity. "
-            "Treat each recommended_anchor as a low-MSE prior.\n"
+            "history using an exponential moving average level prior. Treat each "
+            "recommended_anchor as the low-MSE base forecast.\n"
             "Use the same-channel history and recent_multichannel_tail to identify "
-            "local motion direction, acceleration/deceleration, sensor synchrony, "
-            "and abrupt activity transitions. Optimize MSE: stay close to the anchor "
-            "when evidence is weak, preserve clear recent motion when it is "
-            "consistent across timestamps, and avoid unsupported spikes.\n"
+            "sensor synchrony and clear activity transitions, but do not chase the "
+            "last point or linearly extrapolate short noisy accelerometer wiggles. "
+            "Optimize MSE: stay very close to the anchor when evidence is weak; make "
+            "only small, evidence-backed adjustments when several recent timestamps "
+            "and multiple sensors support the same direction.\n"
             f"Output ONLY {n_forecast} {value_label} for the {step_label}, in target "
             "timestamp order, comma separated. No text.\n\n"
             f"{history_json}"
@@ -912,6 +1147,27 @@ def compute_global_scaled_metrics(detail_log_csv: Path) -> tuple[float, float] |
     return float(residual.abs().mean()), float((residual**2).mean())
 
 
+def uses_anchor_conditioning(config: ExperimentConfig) -> bool:
+    return config.ablation_mode != "gpt_only"
+
+
+def includes_multichannel_context(config: ExperimentConfig) -> bool:
+    return config.ablation_mode not in {
+        "anchor_gpt_no_context",
+        "anchor_gpt_generic_prompt",
+    }
+
+
+def calls_llm(config: ExperimentConfig) -> bool:
+    return config.ablation_mode != "anchor_only"
+
+
+def blends_anchor_with_llm(config: ExperimentConfig, has_anchor: bool) -> bool:
+    if not has_anchor or config.ablation_mode == "anchor_only":
+        return False
+    return config.prompt_style in ANCHOR_BLEND_PROMPT_STYLES
+
+
 def run(config: ExperimentConfig) -> None:
     warnings.filterwarnings("ignore")
     logger = configure_logging(config.debug_log)
@@ -920,7 +1176,10 @@ def run(config: ExperimentConfig) -> None:
     logger.info("Dataset: %s", config.dataset_name)
     logger.info("Model: %s", config.model_id)
     logger.info("Prompt style: %s", config.prompt_style)
-    if config.prompt_style in ANCHOR_BLEND_PROMPT_STYLES:
+    logger.info("Ablation mode: %s", config.ablation_mode)
+    if config.output_dir is not None:
+        logger.info("Output directory: %s", config.output_dir)
+    if config.prompt_style in ANCHOR_BLEND_PROMPT_STYLES and config.ablation_mode != "anchor_only":
         logger.info("Anchor blend weight: %.2f", config.anchor_blend_weight)
     logger.info("API URL: %s", config.api_url)
     logger.info("Thinking mode: %s", "on" if config.enable_thinking else "off")
@@ -990,6 +1249,7 @@ def run(config: ExperimentConfig) -> None:
 
             valid_history = history_scaled[valid_history_mask]
             valid_history_t = t_input[valid_history_mask]
+            history_scaled_values = [float(value.item()) for value in valid_history]
             history_raw = [
                 benchmark.scaled_to_raw(value.item(), encoder_index) for value in valid_history
             ]
@@ -1043,15 +1303,19 @@ def run(config: ExperimentConfig) -> None:
             anchor_predictions_raw: list[float] | None = None
 
             if benchmark.name == "USHCN":
-                prompt_payload["recent_multichannel_tail"] = (
-                    build_recent_multichannel_tail(
-                        t_input,
-                        x_input,
-                        columns,
-                        benchmark,
+                if includes_multichannel_context(config):
+                    prompt_payload["recent_multichannel_tail"] = (
+                        build_recent_multichannel_tail(
+                            t_input,
+                            x_input,
+                            columns,
+                            benchmark,
+                        )
                     )
-                )
-                if config.prompt_style == "gpt_climate_anchor_blend_mse":
+                if (
+                    uses_anchor_conditioning(config)
+                    and config.prompt_style == "gpt_climate_anchor_blend_mse"
+                ):
                     forecast_anchors = build_ushcn_forecast_anchors(
                         variable_name,
                         history_times,
@@ -1063,13 +1327,17 @@ def run(config: ExperimentConfig) -> None:
                     ]
                     prompt_payload["forecast_anchors"] = forecast_anchors
             elif benchmark.name == "HumanActivity":
-                prompt_payload["recent_multichannel_tail"] = build_recent_multichannel_tail(
-                    t_input,
-                    x_input,
-                    columns,
-                    benchmark,
-                )
-                if config.prompt_style == "gpt_activity_anchor_blend_mse":
+                if includes_multichannel_context(config):
+                    prompt_payload["recent_multichannel_tail"] = build_recent_multichannel_tail(
+                        t_input,
+                        x_input,
+                        columns,
+                        benchmark,
+                    )
+                if (
+                    uses_anchor_conditioning(config)
+                    and config.prompt_style == "gpt_activity_anchor_blend_mse"
+                ):
                     forecast_anchors = build_activity_forecast_anchors(
                         history_times,
                         history_raw,
@@ -1079,12 +1347,55 @@ def run(config: ExperimentConfig) -> None:
                         float(anchor["recommended_anchor"]) for anchor in forecast_anchors
                     ]
                     prompt_payload["forecast_anchors"] = forecast_anchors
-            elif config.prompt_style == "gpt_clinical_anchor_blend_mse":
+            elif (
+                benchmark.name == "P12"
+                and uses_anchor_conditioning(config)
+                and config.prompt_style == "gpt_clinical_calibrated_anchor_mse"
+            ):
+                if includes_multichannel_context(config):
+                    prompt_payload["recent_multichannel_tail"] = (
+                        build_p12_recent_multichannel_tail(
+                            t_input,
+                            x_input,
+                            columns,
+                            benchmark,
+                        )
+                    )
+                forecast_anchors = build_p12_calibrated_forecast_anchors(
+                    variable_name,
+                    history_scaled_values,
+                    target_times,
+                    benchmark,
+                    encoder_index,
+                )
+                anchor_predictions_raw = [
+                    float(anchor["recommended_anchor"]) for anchor in forecast_anchors
+                ]
+                prompt_payload["forecast_anchors"] = forecast_anchors
+            elif (
+                uses_anchor_conditioning(config)
+                and config.prompt_style == "gpt_clinical_anchor_blend_mse"
+            ):
                 forecast_anchors = build_p12_forecast_anchors(history_raw, target_times)
                 anchor_predictions_raw = [
                     float(anchor["recommended_anchor"]) for anchor in forecast_anchors
                 ]
                 prompt_payload["forecast_anchors"] = forecast_anchors
+
+            if (
+                benchmark.name == "P12"
+                and includes_multichannel_context(config)
+                and "recent_multichannel_tail" not in prompt_payload
+                and config.prompt_style.startswith("gpt_clinical")
+            ):
+                prompt_payload["recent_multichannel_tail"] = (
+                    build_p12_recent_multichannel_tail(
+                        t_input,
+                        x_input,
+                        columns,
+                        benchmark,
+                    )
+                )
 
             history_json = json.dumps(prompt_payload, indent=2)
 
@@ -1121,61 +1432,81 @@ def run(config: ExperimentConfig) -> None:
                     ),
                 )
 
-            for attempt in range(config.max_retries):
-                if trace_sample:
+            if not calls_llm(config):
+                if anchor_predictions_raw is not None:
+                    predictions_raw = list(anchor_predictions_raw)
+                    raw_output = "[ANCHOR_ONLY]"
+                    if trace_sample:
+                        logger.info(
+                            "    [ANCHOR_ONLY] sample=%s %s=%s anchor=%s",
+                            sample_index + 1,
+                            benchmark.entity_label,
+                            sample.key,
+                            format_values(predictions_raw, digits=4),
+                        )
+                elif trace_sample:
                     logger.info(
-                        "    [CALL] sample=%s %s=%s attempt=%s/%s "
-                        "forecast_n=%s prompt_chars=%s",
+                        "    [ANCHOR_ONLY] sample=%s %s=%s no anchor available",
                         sample_index + 1,
                         benchmark.entity_label,
                         sample.key,
-                        attempt + 1,
-                        config.max_retries,
-                        n_forecast,
-                        len(system_prompt),
                     )
-
-                raw_output = call_llm(config, user_prompt, system_prompt, logger)
-                if not raw_output:
+            else:
+                for attempt in range(config.max_retries):
                     if trace_sample:
                         logger.info(
-                            "    [OUTPUT] sample=%s %s=%s attempt=%s empty response",
+                            "    [CALL] sample=%s %s=%s attempt=%s/%s "
+                            "forecast_n=%s prompt_chars=%s",
                             sample_index + 1,
                             benchmark.entity_label,
                             sample.key,
                             attempt + 1,
+                            config.max_retries,
+                            n_forecast,
+                            len(system_prompt),
                         )
-                    time.sleep(2)
-                    continue
 
-                if trace_sample:
-                    logger.info(
-                        "    [OUTPUT] sample=%s %s=%s attempt=%s raw=%r",
-                        sample_index + 1,
-                        benchmark.entity_label,
-                        sample.key,
-                        attempt + 1,
-                        raw_output[: config.trace_output_chars],
-                    )
+                    raw_output = call_llm(config, user_prompt, system_prompt, logger)
+                    if not raw_output:
+                        if trace_sample:
+                            logger.info(
+                                "    [OUTPUT] sample=%s %s=%s attempt=%s empty response",
+                                sample_index + 1,
+                                benchmark.entity_label,
+                                sample.key,
+                                attempt + 1,
+                            )
+                        time.sleep(2)
+                        continue
 
-                predictions_raw = parse_numbers(raw_output, n_forecast)
-                if predictions_raw is not None:
                     if trace_sample:
                         logger.info(
-                            "    [PARSE] sample=%s %s=%s parsed_raw=%s",
+                            "    [OUTPUT] sample=%s %s=%s attempt=%s raw=%r",
                             sample_index + 1,
                             benchmark.entity_label,
                             sample.key,
-                            format_values(predictions_raw),
+                            attempt + 1,
+                            raw_output[: config.trace_output_chars],
                         )
-                    break
-                if trace_sample:
-                    logger.info(
-                        "    [PARSE] sample=%s %s=%s failed to parse enough numbers",
-                        sample_index + 1,
-                        benchmark.entity_label,
-                        sample.key,
-                    )
+
+                    predictions_raw = parse_numbers(raw_output, n_forecast)
+                    if predictions_raw is not None:
+                        if trace_sample:
+                            logger.info(
+                                "    [PARSE] sample=%s %s=%s parsed_raw=%s",
+                                sample_index + 1,
+                                benchmark.entity_label,
+                                sample.key,
+                                format_values(predictions_raw),
+                            )
+                        break
+                    if trace_sample:
+                        logger.info(
+                            "    [PARSE] sample=%s %s=%s failed to parse enough numbers",
+                            sample_index + 1,
+                            benchmark.entity_label,
+                            sample.key,
+                        )
 
             if predictions_raw is None:
                 predictions_raw = [history_raw[-1]] * n_forecast
@@ -1188,12 +1519,9 @@ def run(config: ExperimentConfig) -> None:
                         raw_output[:100],
                     )
 
-            gpt_predictions_raw = list(predictions_raw)
+            gpt_predictions_raw = list(predictions_raw) if calls_llm(config) else []
             blend_gpt_predictions_raw: list[float] | None = None
-            if (
-                anchor_predictions_raw is not None
-                and config.prompt_style in ANCHOR_BLEND_PROMPT_STYLES
-            ):
+            if blends_anchor_with_llm(config, anchor_predictions_raw is not None):
                 blend_gpt_predictions_raw = clamp_to_recent_history(
                     gpt_predictions_raw,
                     history_raw,
@@ -1262,12 +1590,16 @@ def run(config: ExperimentConfig) -> None:
                         anchor_predictions_raw[step_index],
                         encoder_index,
                     )
-                    gpt_scaled = benchmark.raw_to_scaled(
-                        gpt_predictions_raw[step_index],
-                        encoder_index,
-                    )
-                    detail_row["GPT_predicted_scaled"] = round(gpt_scaled, 6)
-                    detail_row["GPT_predicted_raw"] = round(gpt_predictions_raw[step_index], 4)
+                    if calls_llm(config) and len(gpt_predictions_raw) > step_index:
+                        gpt_scaled = benchmark.raw_to_scaled(
+                            gpt_predictions_raw[step_index],
+                            encoder_index,
+                        )
+                        detail_row["GPT_predicted_scaled"] = round(gpt_scaled, 6)
+                        detail_row["GPT_predicted_raw"] = round(
+                            gpt_predictions_raw[step_index],
+                            4,
+                        )
                     if blend_gpt_predictions_raw is not None:
                         blend_gpt_scaled = benchmark.raw_to_scaled(
                             blend_gpt_predictions_raw[step_index],
@@ -1328,6 +1660,8 @@ def run(config: ExperimentConfig) -> None:
             "Dataset": benchmark.name,
             "Variable": variable_name,
             "Model": config.model_id,
+            "Ablation_mode": config.ablation_mode,
+            "Prompt_style": config.prompt_style,
             "MAE_scaled": round(float(np.mean(mae_scaled)), 6),
             "MSE_scaled": round(float(np.mean(mse_scaled)), 6),
             "MAE_raw": round(float(np.mean(mae_raw)), 4),
