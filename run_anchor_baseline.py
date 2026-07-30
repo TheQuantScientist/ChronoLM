@@ -1,4 +1,4 @@
-"""Run ChronoLM's anchor-only baseline on APN benchmark splits."""
+"""Run ChronoLM's AutoAnchor baseline on APN benchmark splits."""
 
 from __future__ import annotations
 
@@ -13,7 +13,12 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from chronolm.experiments.anchor_baseline import AnchorConfig, canonical_dataset_name, run
+from chronolm.experiments.anchor_baseline import (
+    RUN_NAME_PREFIX,
+    AnchorConfig,
+    canonical_dataset_name,
+    run,
+)
 
 
 DATASET_ORDER = ["P12", "USHCN", "HumanActivity"]
@@ -21,7 +26,7 @@ DATASET_ORDER = ["P12", "USHCN", "HumanActivity"]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run deterministic anchor baselines with APN data splits and metrics."
+        description="Run AutoAnchor baselines with APN data splits and metrics."
     )
     parser.add_argument(
         "--dataset",
@@ -89,7 +94,7 @@ def main() -> None:
         config = AnchorConfig(
             dataset_name=dataset,
             max_test_samples=args.max_test_samples,
-            run_name=f"anchor_only_{dataset.lower()}",
+            run_name=f"{RUN_NAME_PREFIX}_{dataset.lower()}",
             output_dir=output_dir,
             trace_every=args.trace_every,
             progress_every=args.progress_every,

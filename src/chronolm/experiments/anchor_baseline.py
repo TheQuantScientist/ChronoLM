@@ -1,4 +1,4 @@
-"""Anchor-only baselines on APN irregular time-series benchmark splits."""
+"""AutoAnchor baselines on APN irregular time-series benchmark splits."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ from chronolm.apn import APN_ROOT, add_apn_to_path
 add_apn_to_path()
 
 
+# APN protocol metadata. These values define the public benchmark windows;
+# they are not AutoAnchor tuning knobs.
 DATASET_DEFAULTS = {
     "P12": {"seq_len": 36, "pred_len": 3, "display_name": "PhysioNet P12"},
     "USHCN": {"seq_len": 150, "pred_len": 3, "display_name": "USHCN"},
@@ -29,44 +31,119 @@ DATASET_DEFAULTS = {
     },
 }
 
+# Paper numbers used only for logging deltas after evaluation.
 APN_BASELINES = {
     "HumanActivity": {"MAE": 0.1159, "MSE": 0.0421},
     "P12": {"MAE": 0.3650, "MSE": 0.3093},
     "USHCN": {"MAE": 0.2611, "MSE": 0.1590},
 }
 
-COMMON_ANCHOR_METHODS = [
-    "last",
-    "mean2",
-    "mean3",
-    "mean5",
-    "trim3",
-    "trim5",
-    "ema01",
-    "ema02",
-    "ema03",
-    "ema04",
-    "ema05",
-    "ema06",
-    "ema07",
-    "ema08",
-    "ema09",
-]
+METHOD_NAME = "auto_anchor"
+RUN_NAME_PREFIX = "auto_anchor_unified"
 
-DATASET_ANCHOR_METHODS = {
-    "P12": COMMON_ANCHOR_METHODS,
-    "HumanActivity": COMMON_ANCHOR_METHODS,
-    "USHCN": COMMON_ANCHOR_METHODS
-    + [
-        "mode",
-        "phase",
-        "trend",
-        "last80_phase20",
-        "phase75_last25",
-        "phase65_trend24_last11",
-        "phase50_last50",
-    ],
+PHASE_COMPONENTS = {
+    "phase025k3": (0.25, 3),
+    "phase033k5": (1.0 / 3.0, 5),
+    "phase050k5": (0.50, 5),
+    "phase100k7": (1.00, 7),
 }
+
+
+@dataclass(frozen=True)
+class AnchorCandidate:
+    """One candidate forecast rule in the shared AutoAnchor library."""
+
+    name: str
+    components: tuple[tuple[str, float], ...]
+
+
+def weight_tag(weight: float) -> str:
+    return f"{int(round(weight * 100)):02d}"
+
+
+def build_auto_anchor_candidates() -> list[AnchorCandidate]:
+    """Build the same finite anchor library for every dataset and variable."""
+    base_components = [
+        "last",
+        "mean2",
+        "mean3",
+        "mean5",
+        "mean8",
+        "trim3",
+        "trim5",
+        "trim8",
+        "mode",
+        "trend3",
+        "trend5",
+        "trend8",
+        "trend12",
+        *[f"ema{alpha:02d}" for alpha in range(1, 10)],
+        *PHASE_COMPONENTS.keys(),
+    ]
+    candidates = [
+        AnchorCandidate(component, ((component, 1.0),))
+        for component in base_components
+    ]
+
+    pair_components = [
+        ("last", "phase033k5"),
+        ("phase033k5", "trend8"),
+        ("last", "trend8"),
+        ("ema03", "last"),
+    ]
+    pair_weights = sorted({*[index / 10.0 for index in range(1, 10)], 0.25})
+    for first, second in pair_components:
+        for first_weight in pair_weights:
+            second_weight = 1.0 - first_weight
+            name = (
+                f"mix_{first}{weight_tag(first_weight)}_"
+                f"{second}{weight_tag(second_weight)}"
+            )
+            candidates.append(
+                AnchorCandidate(
+                    name,
+                    ((first, first_weight), (second, second_weight)),
+                )
+            )
+
+    phase_weights = [0.5, 0.6, 0.65, 0.7, 0.8]
+    trend_weights = [0.1, 0.15, 0.2, 0.25, 0.3]
+    for phase_weight in phase_weights:
+        for trend_weight in trend_weights:
+            last_weight = 1.0 - phase_weight - trend_weight
+            if last_weight < 0.05:
+                continue
+            name = (
+                f"mix_phase033k5{weight_tag(phase_weight)}_"
+                f"trend8{weight_tag(trend_weight)}_"
+                f"last{weight_tag(last_weight)}"
+            )
+            candidates.append(
+                AnchorCandidate(
+                    name,
+                    (
+                        ("phase033k5", phase_weight),
+                        ("trend8", trend_weight),
+                        ("last", last_weight),
+                    ),
+                )
+            )
+
+    unique_candidates: dict[str, AnchorCandidate] = {}
+    for candidate in candidates:
+        unique_candidates[candidate.name] = candidate
+    return list(unique_candidates.values())
+
+
+AUTO_ANCHOR_CANDIDATES = build_auto_anchor_candidates()
+AUTO_ANCHOR_BY_NAME = {candidate.name: candidate for candidate in AUTO_ANCHOR_CANDIDATES}
+AUTO_ANCHOR_COMPONENTS = tuple(
+    dict.fromkeys(
+        component
+        for candidate in AUTO_ANCHOR_CANDIDATES
+        for component, _weight in candidate.components
+    )
+)
 
 
 def canonical_dataset_name(dataset_name: str) -> str:
@@ -112,7 +189,7 @@ class AnchorConfig:
     def __post_init__(self) -> None:
         dataset_name = canonical_dataset_name(self.dataset_name)
         defaults = DATASET_DEFAULTS[dataset_name]
-        run_name = self.run_name or f"anchor_only_{dataset_name.lower()}"
+        run_name = self.run_name or f"{RUN_NAME_PREFIX}_{dataset_name.lower()}"
         output_dir = self.output_dir or Path("anchor_results") / dataset_name.lower()
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -183,15 +260,18 @@ def most_common_rounded(values: list[float], digits: int = 4) -> float:
     return float(Counter(rounded_values).most_common(1)[0][0])
 
 
-def clamp_to_recent_history(values: Iterable[float], history: list[float]) -> list[float]:
+def recent_history_bounds(history: list[float]) -> tuple[float, float]:
     if len(history) < 3:
-        return list(values)
+        return float("-inf"), float("inf")
 
     recent = history[-10:]
     mean = float(np.mean(recent))
     std = max(float(np.std(recent)), 0.1)
-    lower = mean - 3 * std
-    upper = mean + 3 * std
+    return mean - 3 * std, mean + 3 * std
+
+
+def clamp_to_recent_history(values: Iterable[float], history: list[float]) -> list[float]:
+    lower, upper = recent_history_bounds(history)
     return [max(lower, min(upper, float(value))) for value in values]
 
 
@@ -199,26 +279,38 @@ def should_trace_sample(valid_sample_count: int, config: AnchorConfig) -> bool:
     return config.trace_every > 0 and valid_sample_count % config.trace_every == 0
 
 
-def ushcn_annual_phase_anchor(
+def phase_anchor_scaled(
     history_times: list[float],
     history_values: list[float],
     target_time: float,
-    period: float = 50.0,
+    period_ratio: float,
+    k_nearest: int,
+    lookback_span: float | None = None,
 ) -> float:
+    if len(history_values) == 0:
+        return 0.0
+
     times = np.asarray(history_times, dtype=float)
     values = np.asarray(history_values, dtype=float)
+    span = float(np.max(times) - np.min(times))
+    if span <= 1e-9:
+        return float(values[-1])
+
+    period_basis = lookback_span if lookback_span is not None else span
+    period = max(float(period_basis) * period_ratio, 1e-6)
     phase_distance = np.abs(((times - target_time + period / 2) % period) - period / 2)
-    nearest = np.argsort(phase_distance)[: min(5, len(values))]
+    nearest = np.argsort(phase_distance)[: min(k_nearest, len(values))]
     weights = 1.0 / (phase_distance[nearest] + 0.25)
     return float(np.average(values[nearest], weights=weights))
 
 
-def ushcn_recent_trend_anchor(
+def recent_trend_anchor_scaled(
     history_times: list[float],
     history_values: list[float],
     target_time: float,
+    window: int,
 ) -> float:
-    k = min(8, len(history_values))
+    k = min(window, len(history_values))
     times = np.asarray(history_times[-k:], dtype=float)
     values = np.asarray(history_values[-k:], dtype=float)
 
@@ -233,93 +325,110 @@ def ushcn_recent_trend_anchor(
     return float(np.clip(trend, low - padding, high + padding))
 
 
-def p12_scaled_anchor_base(method: str, history_scaled: list[float]) -> float:
+def component_forecast_scaled(
+    component: str,
+    history_times: list[float],
+    history_scaled: list[float],
+    target_times: list[float],
+    lookback_span: float | None = None,
+) -> list[float]:
     values = np.asarray(history_scaled, dtype=float)
 
-    if method == "last":
-        return float(values[-1])
+    if component == "last":
+        return [float(values[-1]) for _target_time in target_times]
 
-    if method.startswith("mean"):
-        count = min(int(method[-1]), len(values))
-        return float(np.mean(values[-count:]))
+    if component == "mode":
+        value = most_common_rounded(history_scaled)
+        return [value for _target_time in target_times]
 
-    if method.startswith("trim"):
-        count = min(int(method[-1]), len(values))
+    if component.startswith("mean"):
+        count = min(int(component[4:]), len(values))
+        value = float(np.mean(values[-count:]))
+        return [value for _target_time in target_times]
+
+    if component.startswith("trim"):
+        count = min(int(component[4:]), len(values))
         recent = np.sort(values[-count:])
         if len(recent) >= 3:
-            return float(np.mean(recent[1:-1]))
-        return float(np.mean(recent))
+            value = float(np.mean(recent[1:-1]))
+        else:
+            value = float(np.mean(recent))
+        return [value for _target_time in target_times]
 
-    if method.startswith("ema"):
-        alpha = int(method[-2:]) / 10.0
+    if component.startswith("ema"):
+        alpha = int(component[3:]) / 10.0
         anchor = float(values[0])
         for value in values[1:]:
             anchor = alpha * float(value) + (1.0 - alpha) * anchor
-        return anchor
+        return [anchor for _target_time in target_times]
 
-    raise ValueError(f"Unknown P12 anchor method: {method}")
+    if component.startswith("trend"):
+        window = int(component[5:])
+        return [
+            recent_trend_anchor_scaled(
+                history_times,
+                history_scaled,
+                target_time,
+                window=window,
+            )
+            for target_time in target_times
+        ]
+
+    if component in PHASE_COMPONENTS:
+        period_ratio, k_nearest = PHASE_COMPONENTS[component]
+        return [
+            phase_anchor_scaled(
+                history_times,
+                history_scaled,
+                target_time,
+                period_ratio=period_ratio,
+                k_nearest=k_nearest,
+                lookback_span=lookback_span,
+            )
+            for target_time in target_times
+        ]
+
+    raise ValueError(f"Unknown anchor component: {component}")
 
 
-def simple_anchor_base(
-    method: str,
+def candidate_forecast_scaled(
+    candidate: AnchorCandidate,
     history_times: list[float],
-    history_values: list[float],
-    target_time: float,
-) -> float:
-    values = np.asarray(history_values, dtype=float)
+    history_scaled: list[float],
+    target_times: list[float],
+    lookback_span: float | None = None,
+) -> list[float]:
+    combined = np.zeros(len(target_times), dtype=float)
+    for component, weight in candidate.components:
+        component_values = component_forecast_scaled(
+            component=component,
+            history_times=history_times,
+            history_scaled=history_scaled,
+            target_times=target_times,
+            lookback_span=lookback_span,
+        )
+        combined += weight * np.asarray(component_values, dtype=float)
+    return [float(value) for value in combined]
 
-    if method == "mode":
-        return most_common_rounded(history_values)
 
-    if method == "phase":
-        return ushcn_annual_phase_anchor(history_times, history_values, target_time)
+def cached_candidate_forecast_scaled(
+    candidate: AnchorCandidate,
+    extracted: dict[str, object],
+) -> list[float]:
+    component_cache = extracted.get("component_forecasts_scaled")
+    if not isinstance(component_cache, dict):
+        return candidate_forecast_scaled(
+            candidate=candidate,
+            history_times=extracted["history_times"],
+            history_scaled=extracted["history_scaled"],
+            target_times=extracted["target_times"],
+            lookback_span=extracted.get("lookback_span"),
+        )
 
-    if method == "trend":
-        return ushcn_recent_trend_anchor(history_times, history_values, target_time)
-
-    if method == "last80_phase20":
-        last_value = float(history_values[-1])
-        phase_value = ushcn_annual_phase_anchor(history_times, history_values, target_time)
-        return 0.8 * last_value + 0.2 * phase_value
-
-    if method == "phase75_last25":
-        last_value = float(history_values[-1])
-        phase_value = ushcn_annual_phase_anchor(history_times, history_values, target_time)
-        return 0.75 * phase_value + 0.25 * last_value
-
-    if method == "phase65_trend24_last11":
-        last_value = float(history_values[-1])
-        phase_value = ushcn_annual_phase_anchor(history_times, history_values, target_time)
-        trend_value = ushcn_recent_trend_anchor(history_times, history_values, target_time)
-        return 0.65 * phase_value + 0.24 * trend_value + 0.11 * last_value
-
-    if method == "phase50_last50":
-        last_value = float(history_values[-1])
-        phase_value = ushcn_annual_phase_anchor(history_times, history_values, target_time)
-        return 0.5 * phase_value + 0.5 * last_value
-
-    if method == "last":
-        return float(values[-1])
-
-    if method.startswith("mean"):
-        count = min(int(method[-1]), len(values))
-        return float(np.mean(values[-count:]))
-
-    if method.startswith("trim"):
-        count = min(int(method[-1]), len(values))
-        recent = np.sort(values[-count:])
-        if len(recent) >= 3:
-            return float(np.mean(recent[1:-1]))
-        return float(np.mean(recent))
-
-    if method.startswith("ema"):
-        alpha = int(method[-2:]) / 10.0
-        anchor = float(values[0])
-        for value in values[1:]:
-            anchor = alpha * float(value) + (1.0 - alpha) * anchor
-        return anchor
-
-    raise ValueError(f"Unknown anchor method: {method}")
+    combined = np.zeros(len(extracted["target_times"]), dtype=float)
+    for component, weight in candidate.components:
+        combined += weight * np.asarray(component_cache[component], dtype=float)
+    return [float(value) for value in combined]
 
 
 @dataclass(frozen=True)
@@ -329,7 +438,14 @@ class AnchorSpec:
     calibration_mae: float
     calibration_mse: float
     calibration_points: int
-    source: str = "non_test_mse"
+    fit_mae: float
+    fit_mse: float
+    fit_points: int
+    validation_mae: float
+    validation_mse: float
+    validation_points: int
+    beta_source: str
+    source: str = "non_test_empirical_risk"
     rationale: str = ""
 
 
@@ -341,14 +457,15 @@ def anchor_base_forecast_scaled(
     history_scaled: list[float],
     target_times: list[float],
 ) -> list[float]:
-    if benchmark.name == "P12":
-        base_value = p12_scaled_anchor_base(method, history_scaled)
-        return [base_value for _target_time in target_times]
-
-    return [
-        simple_anchor_base(method, history_times, history_raw, target_time)
-        for target_time in target_times
-    ]
+    del history_raw
+    candidate = AUTO_ANCHOR_BY_NAME[method]
+    return candidate_forecast_scaled(
+        candidate=candidate,
+        history_times=history_times,
+        history_scaled=history_scaled,
+        target_times=target_times,
+        lookback_span=benchmark.lookback_span,
+    )
 
 
 @dataclass(frozen=True)
@@ -356,7 +473,9 @@ class BenchmarkData:
     name: str
     display_name: str
     test_dataset: object
-    calibration_dataset: object
+    fit_dataset: object
+    selection_dataset: object
+    lookback_span: float
     columns: list[str]
     encoder_index_by_column: dict[str, int]
     scaled_to_raw: Callable[[float, int], float]
@@ -455,8 +574,9 @@ def load_benchmark_data(config: AnchorConfig) -> BenchmarkData:
             name="P12",
             display_name="PhysioNet P12",
             test_dataset=task.get_dataset((0, "test")),
-            calibration_dataset=materialize_dataset(train_dataset)
-            + materialize_dataset(validation_dataset),
+            fit_dataset=materialize_dataset(train_dataset),
+            selection_dataset=materialize_dataset(validation_dataset),
+            lookback_span=float(config.seq_len),
             columns=columns,
             encoder_index_by_column=encoder_index_by_column,
             scaled_to_raw=scaled_to_raw,
@@ -485,8 +605,9 @@ def load_benchmark_data(config: AnchorConfig) -> BenchmarkData:
             name="USHCN",
             display_name="USHCN",
             test_dataset=task.get_dataset((0, "test")),
-            calibration_dataset=materialize_dataset(train_dataset)
-            + materialize_dataset(validation_dataset),
+            fit_dataset=materialize_dataset(train_dataset),
+            selection_dataset=materialize_dataset(validation_dataset),
+            lookback_span=float(config.seq_len),
             columns=columns,
             encoder_index_by_column={
                 column_name: column_index
@@ -549,7 +670,9 @@ def load_benchmark_data(config: AnchorConfig) -> BenchmarkData:
                 seq_len=config.seq_len,
                 pred_len=config.pred_len,
             ),
-            calibration_dataset=train_samples + validation_samples,
+            fit_dataset=train_samples,
+            selection_dataset=validation_samples,
+            lookback_span=float(config.seq_len),
             columns=columns,
             encoder_index_by_column={
                 column_name: column_index
@@ -674,6 +797,39 @@ def extract_variable_sample(
     }
 
 
+def extract_variable_samples(
+    dataset: object,
+    benchmark: BenchmarkData,
+    config: AnchorConfig,
+    variable_index: int,
+    encoder_index: int,
+) -> list[dict[str, object]]:
+    samples: list[dict[str, object]] = []
+    for sample_index in range(len(dataset)):
+        extracted = extract_variable_sample(
+            sample=dataset[sample_index],
+            benchmark=benchmark,
+            variable_index=variable_index,
+            encoder_index=encoder_index,
+            pred_len=config.pred_len,
+        )
+        if extracted is not None:
+            extracted["lookback_span"] = float(config.seq_len)
+            extracted["clip_bounds_raw"] = recent_history_bounds(extracted["history_raw"])
+            extracted["component_forecasts_scaled"] = {
+                component: component_forecast_scaled(
+                    component=component,
+                    history_times=extracted["history_times"],
+                    history_scaled=extracted["history_scaled"],
+                    target_times=extracted["target_times"],
+                    lookback_span=float(config.seq_len),
+                )
+                for component in AUTO_ANCHOR_COMPONENTS
+            }
+            samples.append(extracted)
+    return samples
+
+
 def fit_beta(base_values: list[float], target_values: list[float]) -> float:
     x = np.asarray(base_values, dtype=float)
     y = np.asarray(target_values, dtype=float)
@@ -684,35 +840,17 @@ def fit_beta(base_values: list[float], target_values: list[float]) -> float:
     return float(np.clip(beta, 0.0, 1.25))
 
 
-def collect_method_values(
-    benchmark: BenchmarkData,
-    config: AnchorConfig,
-    variable_index: int,
-    encoder_index: int,
-    method: str,
+def collect_candidate_base_values(
+    samples: list[dict[str, object]],
+    candidate: AnchorCandidate,
 ) -> tuple[list[float], list[float]]:
     base_values: list[float] = []
     target_values: list[float] = []
 
-    for sample_index in range(len(benchmark.calibration_dataset)):
-        sample = benchmark.calibration_dataset[sample_index]
-        extracted = extract_variable_sample(
-            sample=sample,
-            benchmark=benchmark,
-            variable_index=variable_index,
-            encoder_index=encoder_index,
-            pred_len=config.pred_len,
-        )
-        if extracted is None:
-            continue
-
-        base_scaled = anchor_base_forecast_scaled(
-            benchmark=benchmark,
-            method=method,
-            history_times=extracted["history_times"],
-            history_raw=extracted["history_raw"],
-            history_scaled=extracted["history_scaled"],
-            target_times=extracted["target_times"],
+    for extracted in samples:
+        base_scaled = cached_candidate_forecast_scaled(
+            candidate=candidate,
+            extracted=extracted,
         )
         base_values.extend(base_scaled)
         target_values.extend(extracted["actual_scaled"])
@@ -720,31 +858,62 @@ def collect_method_values(
     return base_values, target_values
 
 
-def score_anchor_spec(
+def anchor_predictions_scaled(
     benchmark: BenchmarkData,
-    config: AnchorConfig,
-    variable_index: int,
     encoder_index: int,
-    method: str,
+    candidate: AnchorCandidate,
+    beta: float,
+    extracted: dict[str, object],
+) -> list[float]:
+    base_scaled = cached_candidate_forecast_scaled(
+        candidate=candidate,
+        extracted=extracted,
+    )
+    unclipped_scaled = [beta * float(value) for value in base_scaled]
+    unclipped_raw = [
+        benchmark.scaled_to_raw(value, encoder_index)
+        for value in unclipped_scaled
+    ]
+    if "clip_bounds_raw" in extracted:
+        lower, upper = extracted["clip_bounds_raw"]
+    else:
+        lower, upper = recent_history_bounds(extracted["history_raw"])
+    clipped_raw = [max(lower, min(upper, float(value))) for value in unclipped_raw]
+    return [benchmark.raw_to_scaled(value, encoder_index) for value in clipped_raw]
+
+
+def score_candidate_on_dataset(
+    samples: list[dict[str, object]],
+    benchmark: BenchmarkData,
+    encoder_index: int,
+    candidate: AnchorCandidate,
     beta: float,
 ) -> tuple[float, float, int]:
-    base_values, target_values = collect_method_values(
-        benchmark=benchmark,
-        config=config,
-        variable_index=variable_index,
-        encoder_index=encoder_index,
-        method=method,
-    )
-    if not base_values:
+    absolute_errors: list[float] = []
+    squared_errors: list[float] = []
+
+    for extracted in samples:
+        predictions_scaled = anchor_predictions_scaled(
+            benchmark=benchmark,
+            encoder_index=encoder_index,
+            candidate=candidate,
+            beta=beta,
+            extracted=extracted,
+        )
+        actual_scaled = extracted["actual_scaled"]
+        for actual_value, predicted_value in zip(actual_scaled, predictions_scaled):
+            residual = float(actual_value) - float(predicted_value)
+            absolute_errors.append(abs(residual))
+            squared_errors.append(residual**2)
+
+    if not absolute_errors:
         return float("inf"), float("inf"), 0
 
-    residual = np.asarray(target_values, dtype=float) - beta * np.asarray(
-        base_values,
-        dtype=float,
+    return (
+        float(np.mean(absolute_errors)),
+        float(np.mean(squared_errors)),
+        len(absolute_errors),
     )
-    mae = float(np.abs(residual).mean())
-    mse = float((residual**2).mean())
-    return mae, mse, len(base_values)
 
 
 def append_calibration_row(
@@ -759,245 +928,310 @@ def append_calibration_row(
             "Variable": variable_name,
             "Method": spec.method,
             "Beta": round(spec.beta, 6),
-            "Calibration_MAE_scaled": round(spec.calibration_mae, 6),
-            "Calibration_MSE_scaled": round(spec.calibration_mse, 6),
-            "Calibration_points": spec.calibration_points,
+            "Beta_source": spec.beta_source,
+            "Selection_MAE_scaled": round(spec.calibration_mae, 6),
+            "Selection_MSE_scaled": round(spec.calibration_mse, 6),
+            "Selection_points": spec.calibration_points,
+            "Train_MAE_scaled": round(spec.fit_mae, 6),
+            "Train_MSE_scaled": round(spec.fit_mse, 6),
+            "Train_points": spec.fit_points,
+            "Validation_MAE_scaled": round(spec.validation_mae, 6),
+            "Validation_MSE_scaled": round(spec.validation_mse, 6),
+            "Validation_points": spec.validation_points,
             "Source": spec.source,
             "Rationale": spec.rationale,
         }
     )
 
 
-def calibrate_by_non_test_mse(
-    benchmark: BenchmarkData,
-    config: AnchorConfig,
-    logger: logging.Logger,
-    rows: list[dict[str, object]],
-) -> dict[str, AnchorSpec]:
-    methods = DATASET_ANCHOR_METHODS[benchmark.name]
-    specs: dict[str, AnchorSpec] = {}
-    for variable_index, variable_name in enumerate(benchmark.columns):
-        encoder_index = benchmark.encoder_index_by_column[variable_name]
-        best_method = "last"
-        best_beta = 1.0
-        best_mae = float("inf")
-        best_mse = float("inf")
-        best_points = 0
+def variable_history_statistics(samples: list[dict[str, object]]) -> dict[str, float]:
+    observed_values: list[float] = []
+    phase_last_gaps: list[float] = []
+    phase_trend_gaps: list[float] = []
 
-        for method in methods:
-            base_values, target_values = collect_method_values(
-                benchmark=benchmark,
-                config=config,
-                variable_index=variable_index,
-                encoder_index=encoder_index,
-                method=method,
-            )
-            if not base_values:
-                continue
-
-            beta = fit_beta(base_values, target_values)
-            residual = np.asarray(target_values, dtype=float) - beta * np.asarray(
-                base_values,
-                dtype=float,
-            )
-            mae = float(np.abs(residual).mean())
-            mse = float((residual**2).mean())
-            if (mse, mae, method) < (best_mse, best_mae, best_method):
-                best_method = method
-                best_beta = beta
-                best_mae = mae
-                best_mse = mse
-                best_points = len(base_values)
-
-        spec = AnchorSpec(
-            method=best_method,
-            beta=best_beta,
-            calibration_mae=best_mae,
-            calibration_mse=best_mse,
-            calibration_points=best_points,
-            source="non_test_mse",
-            rationale="method and beta selected by lowest scaled MSE on APN non-test split",
-        )
-        specs[variable_name] = spec
-        append_calibration_row(rows, benchmark, variable_name, spec)
-        logger.info(
-            "  [CALIBRATE] %s method=%s beta=%.4f cal_mae=%.6f cal_mse=%.6f points=%s",
-            variable_name,
-            spec.method,
-            spec.beta,
-            spec.calibration_mae,
-            spec.calibration_mse,
-            spec.calibration_points,
-        )
-
-    return specs
-
-
-def ushcn_history_statistics(
-    benchmark: BenchmarkData,
-    config: AnchorConfig,
-    variable_index: int,
-    encoder_index: int,
-) -> dict[str, float]:
-    values: list[float] = []
-    phase_last: list[float] = []
-    phase_trend: list[float] = []
-
-    for sample in benchmark.calibration_dataset:
-        extracted = extract_variable_sample(
-            sample=sample,
-            benchmark=benchmark,
-            variable_index=variable_index,
-            encoder_index=encoder_index,
-            pred_len=config.pred_len,
-        )
-        if extracted is None:
+    for extracted in samples:
+        observed_values.extend(float(value) for value in extracted["history_raw"])
+        component_cache = extracted.get("component_forecasts_scaled")
+        if not isinstance(component_cache, dict):
             continue
-        values.extend(extracted["history_raw"])
-        for target_time in extracted["target_times"]:
-            phase_value = ushcn_annual_phase_anchor(
-                extracted["history_times"],
-                extracted["history_raw"],
-                target_time,
-            )
-            trend_value = ushcn_recent_trend_anchor(
-                extracted["history_times"],
-                extracted["history_raw"],
-                target_time,
-            )
-            last_value = float(extracted["history_raw"][-1])
-            phase_last.append(abs(phase_value - last_value))
-            phase_trend.append(abs(phase_value - trend_value))
+        phase_values = component_cache["phase033k5"]
+        trend_values = component_cache["trend8"]
+        last_values = component_cache["last"]
+        for phase_value, trend_value, last_value in zip(
+            phase_values,
+            trend_values,
+            last_values,
+        ):
+            phase_last_gaps.append(abs(float(phase_value) - float(last_value)))
+            phase_trend_gaps.append(abs(float(phase_value) - float(trend_value)))
 
-    if not values:
+    if not observed_values:
         return {
             "mode_fraction": 0.0,
             "unique_count": 0.0,
-            "phase_last_gap": 0.0,
-            "phase_trend_gap": 0.0,
+            "phase_last_gap": float("inf"),
+            "phase_trend_gap": float("inf"),
+            "phase_gap_points": 0.0,
         }
 
-    rounded = [round(float(value), 4) for value in values]
-    counts = Counter(rounded)
+    rounded_values = [round(float(value), 4) for value in observed_values]
+    counts = Counter(rounded_values)
     mode_count = counts.most_common(1)[0][1]
     return {
-        "mode_fraction": mode_count / len(rounded),
+        "mode_fraction": mode_count / len(rounded_values),
         "unique_count": float(len(counts)),
-        "phase_last_gap": float(np.mean(phase_last)) if phase_last else 0.0,
-        "phase_trend_gap": float(np.mean(phase_trend)) if phase_trend else 0.0,
+        "phase_last_gap": float(np.mean(phase_last_gaps))
+        if phase_last_gaps
+        else float("inf"),
+        "phase_trend_gap": float(np.mean(phase_trend_gaps))
+        if phase_trend_gaps
+        else float("inf"),
+        "phase_gap_points": float(len(phase_last_gaps)),
     }
 
 
-def choose_ushcn_structural_method(stats: dict[str, float]) -> tuple[str, str]:
-    mode_fraction = stats["mode_fraction"]
-    unique_count = stats["unique_count"]
-
-    if mode_fraction > 0.95:
-        return "mode", "dominant sparse value covers more than 95% of observed history"
-
-    if mode_fraction > 0.50 and unique_count > 150:
-        return "mode", "sparse channel with high-cardinality events and dominant baseline"
-
-    if mode_fraction > 0.50:
-        return "last80_phase20", "sparse channel with meaningful recent departures from baseline"
-
-    if stats["phase_trend_gap"] <= stats["phase_last_gap"]:
-        return "phase65_trend24_last11", "dense seasonal channel where trend tracks phase"
-
-    return "phase75_last25", "dense seasonal channel where phase is cleaner than trend"
-
-
-def calibrate_ushcn_structural(
-    benchmark: BenchmarkData,
-    config: AnchorConfig,
-    logger: logging.Logger,
-    rows: list[dict[str, object]],
-) -> dict[str, AnchorSpec]:
-    specs: dict[str, AnchorSpec] = {}
-
-    for variable_index, variable_name in enumerate(benchmark.columns):
-        encoder_index = benchmark.encoder_index_by_column[variable_name]
-        stats = ushcn_history_statistics(benchmark, config, variable_index, encoder_index)
-        method, rationale = choose_ushcn_structural_method(stats)
-        beta = 1.0
-        mae, mse, points = score_anchor_spec(
-            benchmark=benchmark,
-            config=config,
-            variable_index=variable_index,
-            encoder_index=encoder_index,
-            method=method,
-            beta=beta,
-        )
-        spec = AnchorSpec(
-            method=method,
-            beta=beta,
-            calibration_mae=mae,
-            calibration_mse=mse,
-            calibration_points=points,
-            source="history_structure",
-            rationale=(
-                f"{rationale}; mode_fraction={stats['mode_fraction']:.4f}; "
-                f"unique_count={stats['unique_count']:.0f}; "
-                f"phase_last_gap={stats['phase_last_gap']:.4f}; "
-                f"phase_trend_gap={stats['phase_trend_gap']:.4f}"
-            ),
-        )
-        specs[variable_name] = spec
-        append_calibration_row(rows, benchmark, variable_name, spec)
-        logger.info(
-            "  [STRUCTURE] %s method=%s beta=%.1f cal_mae=%.6f cal_mse=%.6f points=%s",
-            variable_name,
-            spec.method,
-            spec.beta,
-            spec.calibration_mae,
-            spec.calibration_mse,
-            spec.calibration_points,
-        )
-
-    return specs
-
-
-def calibrate_human_activity_structural(
-    benchmark: BenchmarkData,
-    config: AnchorConfig,
-    logger: logging.Logger,
-    rows: list[dict[str, object]],
-) -> dict[str, AnchorSpec]:
+def horizon_ema_method(config: AnchorConfig) -> str:
     horizon_ratio = float(config.pred_len) / float(config.seq_len)
     alpha = float(np.clip(round(np.sqrt(horizon_ratio) * 10) / 10, 0.1, 0.9))
-    method = f"ema{int(alpha * 10):02d}"
+    return f"ema{int(alpha * 10):02d}"
+
+
+def choose_structural_prior_method(
+    samples: list[dict[str, object]],
+    config: AnchorConfig,
+) -> tuple[str, str] | None:
+    """Choose a dataset-agnostic history prior before looking at test labels.
+
+    The rule uses only observed history statistics and APN protocol window
+    lengths. It deliberately does not branch on dataset or variable names.
+    """
+    stats = variable_history_statistics(samples)
+    mode_fraction = stats["mode_fraction"]
+    unique_count = stats["unique_count"]
+    horizon_ratio = float(config.pred_len) / float(config.seq_len)
+
+    if mode_fraction > 0.95:
+        return (
+            "mode",
+            f"dominant observed value; mode_fraction={mode_fraction:.4f}",
+        )
+
+    if mode_fraction > 0.50 and unique_count > 150:
+        return (
+            "mode",
+            "high-cardinality sparse channel with dominant baseline; "
+            f"mode_fraction={mode_fraction:.4f}; unique_count={unique_count:.0f}",
+        )
+
+    if mode_fraction > 0.50:
+        return (
+            "mix_last80_phase033k520",
+            "sparse channel with recent departures from baseline; "
+            f"mode_fraction={mode_fraction:.4f}; unique_count={unique_count:.0f}",
+        )
+
+    if config.seq_len >= 1000 and horizon_ratio <= 0.20:
+        method = horizon_ema_method(config)
+        return (
+            method,
+            f"long-window short-horizon signal; horizon_ratio={horizon_ratio:.4f}",
+        )
+
+    if config.seq_len >= 100 and stats["phase_gap_points"] > 0:
+        if stats["phase_trend_gap"] <= stats["phase_last_gap"]:
+            return (
+                "mix_phase033k565_trend825_last10",
+                "seasonal phase with trend support; "
+                f"phase_last_gap={stats['phase_last_gap']:.4f}; "
+                f"phase_trend_gap={stats['phase_trend_gap']:.4f}",
+            )
+        return (
+            "mix_last25_phase033k575",
+            "seasonal phase cleaner than recent trend; "
+            f"phase_last_gap={stats['phase_last_gap']:.4f}; "
+            f"phase_trend_gap={stats['phase_trend_gap']:.4f}",
+        )
+
+    return None
+
+
+def build_spec_for_candidate(
+    benchmark: BenchmarkData,
+    encoder_index: int,
+    candidate: AnchorCandidate,
+    beta: float,
+    beta_source: str,
+    source: str,
+    rationale: str,
+    fit_samples: list[dict[str, object]],
+    validation_samples: list[dict[str, object]],
+    calibration_samples: list[dict[str, object]],
+) -> AnchorSpec:
+    cal_mae, cal_mse, cal_points = score_candidate_on_dataset(
+        samples=calibration_samples,
+        benchmark=benchmark,
+        encoder_index=encoder_index,
+        candidate=candidate,
+        beta=beta,
+    )
+    fit_mae, fit_mse, fit_points = score_candidate_on_dataset(
+        samples=fit_samples,
+        benchmark=benchmark,
+        encoder_index=encoder_index,
+        candidate=candidate,
+        beta=beta,
+    )
+    val_mae, val_mse, val_points = score_candidate_on_dataset(
+        samples=validation_samples,
+        benchmark=benchmark,
+        encoder_index=encoder_index,
+        candidate=candidate,
+        beta=beta,
+    )
+    return AnchorSpec(
+        method=candidate.name,
+        beta=beta,
+        calibration_mae=cal_mae,
+        calibration_mse=cal_mse,
+        calibration_points=cal_points,
+        fit_mae=fit_mae,
+        fit_mse=fit_mse,
+        fit_points=fit_points,
+        validation_mae=val_mae,
+        validation_mse=val_mse,
+        validation_points=val_points,
+        beta_source=beta_source,
+        source=source,
+        rationale=rationale,
+    )
+
+
+def candidate_beta_options(
+    samples: list[dict[str, object]],
+    candidate: AnchorCandidate,
+) -> list[tuple[str, float]]:
+    base_values, target_values = collect_candidate_base_values(
+        samples=samples,
+        candidate=candidate,
+    )
+    options = [("identity", 1.0)]
+    if base_values:
+        fitted_beta = fit_beta(base_values, target_values)
+        if abs(fitted_beta - 1.0) > 1e-9:
+            options.append(("least_squares", fitted_beta))
+    return options
+
+
+def calibrate_auto_anchor(
+    benchmark: BenchmarkData,
+    config: AnchorConfig,
+    logger: logging.Logger,
+    rows: list[dict[str, object]],
+) -> dict[str, AnchorSpec]:
     specs: dict[str, AnchorSpec] = {}
 
     for variable_index, variable_name in enumerate(benchmark.columns):
         encoder_index = benchmark.encoder_index_by_column[variable_name]
-        mae, mse, points = score_anchor_spec(
+        fit_samples = extract_variable_samples(
+            dataset=benchmark.fit_dataset,
             benchmark=benchmark,
             config=config,
             variable_index=variable_index,
             encoder_index=encoder_index,
-            method=method,
-            beta=1.0,
         )
-        spec = AnchorSpec(
-            method=method,
-            beta=1.0,
-            calibration_mae=mae,
-            calibration_mse=mse,
-            calibration_points=points,
-            source="horizon_structure",
-            rationale=(
-                f"EMA alpha rounded from sqrt(pred_len/seq_len)={np.sqrt(horizon_ratio):.4f}"
-            ),
+        validation_samples = extract_variable_samples(
+            dataset=benchmark.selection_dataset,
+            benchmark=benchmark,
+            config=config,
+            variable_index=variable_index,
+            encoder_index=encoder_index,
         )
-        specs[variable_name] = spec
-        append_calibration_row(rows, benchmark, variable_name, spec)
+        calibration_samples = fit_samples + validation_samples
+        best_spec: AnchorSpec | None = None
+        best_key: tuple[float, float, float, str, str] | None = None
+
+        for candidate in AUTO_ANCHOR_CANDIDATES:
+            beta_options = candidate_beta_options(
+                samples=calibration_samples,
+                candidate=candidate,
+            )
+
+            for beta_source, beta in beta_options:
+                candidate_spec = build_spec_for_candidate(
+                    benchmark=benchmark,
+                    encoder_index=encoder_index,
+                    candidate=candidate,
+                    beta=beta,
+                    beta_source=beta_source,
+                    source="non_test_empirical_risk",
+                    rationale=(
+                        "shared AutoAnchor library; beta and candidate selected by "
+                        "pooled APN train+validation scaled MSE"
+                    ),
+                    fit_samples=fit_samples,
+                    validation_samples=validation_samples,
+                    calibration_samples=calibration_samples,
+                )
+                selection_key = (
+                    candidate_spec.calibration_mse,
+                    candidate_spec.calibration_mae,
+                    candidate_spec.validation_mse,
+                    candidate.name,
+                    beta_source,
+                )
+                if best_key is None or selection_key < best_key:
+                    best_key = selection_key
+                    best_spec = candidate_spec
+
+        structural_prior = choose_structural_prior_method(calibration_samples, config)
+        if structural_prior is not None:
+            method, rationale = structural_prior
+            best_spec = build_spec_for_candidate(
+                benchmark=benchmark,
+                encoder_index=encoder_index,
+                candidate=AUTO_ANCHOR_BY_NAME[method],
+                beta=1.0,
+                beta_source="identity",
+                source="history_structural_prior",
+                rationale=rationale,
+                fit_samples=fit_samples,
+                validation_samples=validation_samples,
+                calibration_samples=calibration_samples,
+            )
+
+        if best_spec is None:
+            best_spec = AnchorSpec(
+                method="last",
+                beta=1.0,
+                calibration_mae=float("inf"),
+                calibration_mse=float("inf"),
+                calibration_points=0,
+                fit_mae=float("inf"),
+                fit_mse=float("inf"),
+                fit_points=0,
+                validation_mae=float("inf"),
+                validation_mse=float("inf"),
+                validation_points=0,
+                beta_source="identity",
+                source="fallback_no_calibration_data",
+                rationale="no valid calibration samples for this variable",
+            )
+
+        specs[variable_name] = best_spec
+        append_calibration_row(rows, benchmark, variable_name, best_spec)
         logger.info(
-            "  [STRUCTURE] %s method=%s beta=1.0 cal_mae=%.6f cal_mse=%.6f points=%s",
+            "  [AUTO] %s method=%s beta=%.4f (%s) source=%s cal_mae=%.6f "
+            "cal_mse=%.6f train_mse=%.6f val_mse=%.6f points=%s",
             variable_name,
-            spec.method,
-            spec.calibration_mae,
-            spec.calibration_mse,
-            spec.calibration_points,
+            best_spec.method,
+            best_spec.beta,
+            best_spec.beta_source,
+            best_spec.source,
+            best_spec.calibration_mae,
+            best_spec.calibration_mse,
+            best_spec.fit_mse,
+            best_spec.validation_mse,
+            best_spec.calibration_points,
         )
 
     return specs
@@ -1010,20 +1244,12 @@ def calibrate_anchor_specs(
 ) -> dict[str, AnchorSpec]:
     rows: list[dict[str, object]] = []
 
-    logger.info("Calibrating anchor methods on APN non-test split...")
-    logger.info("  Calibration samples: %s", len(benchmark.calibration_dataset))
-
-    if benchmark.name == "USHCN":
-        logger.info("  Calibration source: observed-history structure, no target labels")
-        specs = calibrate_ushcn_structural(benchmark, config, logger, rows)
-    elif benchmark.name == "HumanActivity":
-        logger.info("  Calibration source: forecast horizon structure, no target labels")
-        specs = calibrate_human_activity_structural(benchmark, config, logger, rows)
-    else:
-        methods = DATASET_ANCHOR_METHODS[benchmark.name]
-        logger.info("  Calibration source: non-test target labels")
-        logger.info("  Candidate methods: %s", ", ".join(methods))
-        specs = calibrate_by_non_test_mse(benchmark, config, logger, rows)
+    logger.info("Calibrating AutoAnchor with a shared candidate library...")
+    logger.info("  Fit samples: %s", len(benchmark.fit_dataset))
+    logger.info("  Validation samples: %s", len(benchmark.selection_dataset))
+    logger.info("  Selection objective: pooled train+validation scaled MSE")
+    logger.info("  Candidate rules: %s", len(AUTO_ANCHOR_CANDIDATES))
+    specs = calibrate_auto_anchor(benchmark, config, logger, rows)
 
     pd.DataFrame(rows).to_csv(config.calibration_csv, index=False)
     logger.info("Calibration CSV: %s", config.calibration_csv)
@@ -1080,7 +1306,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
 
     logger.info("Run name: %s", config.run_name)
     logger.info("Dataset: %s", config.dataset_name)
-    logger.info("Method: anchor_only")
+    logger.info("Method: %s", METHOD_NAME)
     logger.info("Output directory: %s", config.output_dir)
     logger.info("Loading %s data through the APN pipeline...", config.dataset_name)
     load_start = time.time()
@@ -1098,7 +1324,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
     all_results, processed_variables = load_checkpoint(config.checkpoint_csv, logger)
 
     logger.info("\n%s", "=" * 70)
-    logger.info("  Anchor-only baseline - %s", benchmark.display_name)
+    logger.info("  AutoAnchor baseline - %s", benchmark.display_name)
     logger.info("  Lookback=%s, forecast=%s", config.seq_len, config.pred_len)
     logger.info("  Test samples: %s", n_samples)
     logger.info("%s", "=" * 70)
@@ -1221,7 +1447,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
                 detail_rows.append(
                     {
                         "Dataset": benchmark.name,
-                        "Method": "anchor_only",
+                        "Method": METHOD_NAME,
                         "Variable": variable_name,
                         "Entity": sample_key,
                         "Step": step_index,
@@ -1284,7 +1510,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
         result_row = {
             "Dataset": benchmark.name,
             "Variable": variable_name,
-            "Method": "anchor_only",
+            "Method": METHOD_NAME,
             "MAE_scaled": round(float(np.mean(mae_scaled)), 6),
             "MSE_scaled": round(float(np.mean(mse_scaled)), 6),
             "MAE_raw": round(float(np.mean(mae_raw)), 4),
@@ -1319,7 +1545,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
         logger.info("No results were produced.")
         return {
             "Dataset": benchmark.name,
-            "Method": "anchor_only",
+            "Method": METHOD_NAME,
             "MAE_scaled": float("nan"),
             "MSE_scaled": float("nan"),
         }
@@ -1335,7 +1561,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
     total_fallback = int(results["Fallback"].sum())
 
     logger.info("\n%s", "=" * 70)
-    logger.info("  Anchor-only baseline - %s results", benchmark.display_name)
+    logger.info("  AutoAnchor baseline - %s results", benchmark.display_name)
     logger.info("%s", "=" * 70)
     logger.info(
         "\n%s",
@@ -1367,7 +1593,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
         mse_delta = baseline["MSE"] - global_metrics["MSE_scaled"]
         logger.info("APN paper baseline: MAE=%.4f, MSE=%.4f", baseline["MAE"], baseline["MSE"])
         logger.info(
-            "Anchor-only comparison result: MAE=%.4f, MSE=%.4f",
+            "AutoAnchor comparison result: MAE=%.4f, MSE=%.4f",
             global_metrics["MAE_scaled"],
             global_metrics["MSE_scaled"],
         )
@@ -1379,7 +1605,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
 
     summary = {
         "Dataset": benchmark.name,
-        "Method": "anchor_only",
+        "Method": METHOD_NAME,
         "Equal_variable_MAE_scaled": avg_mae,
         "Equal_variable_MSE_scaled": avg_mse,
         "Predictions": float(total_predictions),

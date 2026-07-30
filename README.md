@@ -6,18 +6,19 @@ forecasting when evaluated with the same APN data splits and scaled metrics?
 
 The upstream APN repository is kept under `APN/` and remains the source of truth
 for trained APN and paper-baseline model settings. ChronoLM code outside that
-folder only contains our anchor-only runner and orchestration utilities.
+folder only contains our AutoAnchor runner and orchestration utilities.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
 | `APN/` | Upstream APN implementation, datasets, configs, and model scripts. |
-| `src/chronolm/experiments/anchor_baseline.py` | Deterministic anchor-only runner using APN data loaders and metrics. |
+| `src/chronolm/experiments/anchor_baseline.py` | AutoAnchor runner using APN data loaders and metrics. |
 | `run_anchor_baseline.py` | Root-level launcher for anchor runs on P12, USHCN, and HumanActivity. |
 | `run_apn_paper_models.py` | Root-level wrapper for APN paper model scripts. |
 | `scripts/compute_global_metrics.py` | Utility for APN-style global MAE/MSE from detail logs. |
-| `apn_benchmark_results.md` | Current paper-table results with our anchor-only row. |
+| `docs/auto_anchor.md` | Method note, current results, and ICLR-grade ablation checklist. |
+| `apn_benchmark_results.md` | Current paper-table results with our AutoAnchor row. |
 
 Generated logs, CSVs, checkpoints, and local environments are ignored by git.
 
@@ -76,15 +77,19 @@ Outputs go under `anchor_results/<dataset>/` and include:
 | `*_debug.log` | Progress and compact trace logging. |
 | `anchor_results/anchor_summary.csv` | APN-style global summary across completed datasets. |
 
-The anchor runner does not store per-variable test-set constants. P12 chooses
-the anchor method and shrinkage on APN train+validation labels, then evaluates
-once on test. USHCN chooses seasonal/sparse anchors from observed-history
-structure, and HumanActivity uses a horizon-based EMA rule.
+AutoAnchor uses one shared candidate library for every supported dataset and
+variable. Dataset-specific code is limited to APN data loading, split choice,
+and benchmark window sizes. The selector first evaluates candidates on APN
+train+validation targets; when the observed histories have a strong generic
+signature, such as sparse mode dominance, long-window short-horizon dynamics,
+or seasonal phase structure, a deterministic history-only prior selects the
+corresponding candidate. Test labels are used only once for final reporting.
+The calibration CSV records the source and rationale for every variable.
 
 Compute APN-style metrics from any detail log:
 
 ```bash
-python scripts/compute_global_metrics.py anchor_results/p12/anchor_only_p12_P12_DetailLog.csv
+python scripts/compute_global_metrics.py anchor_results/p12/auto_anchor_unified_p12_P12_DetailLog.csv
 ```
 
 ## Run APN Paper Models
