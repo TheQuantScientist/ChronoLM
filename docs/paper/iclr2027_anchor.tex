@@ -1,0 +1,439 @@
+\documentclass{article}
+
+% Keep the package name that matches your local ICLR template files.
+% If your template folder provides iclr2027_conference.sty, change 2026 to 2027.
+\usepackage{iclr2026_conference,times}
+
+\IfFileExists{math_commands.tex}{\input{math_commands.tex}}{}
+
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,calc,positioning,fit,backgrounds}
+\usepackage{url}
+
+\title{Are Neural Models Necessary for \\ Irregular Time Series Forecasting?}
+
+% Anonymous submission. Replace after acceptance or when preparing a non-anonymous draft.
+\author{Anonymous Authors}
+
+\newcommand{\method}{AutoAnchor}
+\newcommand{\family}{Anchor family}
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\second}[1]{\underline{#1}}
+
+%\iclrfinalcopy
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Irregular time-series forecasting is commonly treated as a setting that requires
+specialized neural architectures for handling uneven timestamps, missingness,
+and variable-specific observation patterns. This paper asks a deliberately
+simple question: are neural models necessary for the standard irregular
+forecasting benchmarks? We introduce an \family{} of deterministic, training-free
+history anchors and a unified selector, \method{}, evaluated under the same
+splits, scaling, masks, and metrics as the APN benchmark protocol. Early results
+show that \method{} matches or exceeds APN-style reported performance on
+PhysioNet, USHCN, and HumanActivity, while requiring no backpropagation and no
+GPU training. The goal of the paper is not to claim that neural models are never
+useful, but to show that current benchmark conclusions are incomplete unless
+strong non-neural anchor baselines are included.
+\end{abstract}
+
+\section{Introduction}
+
+\begin{itemize}
+    \item Motivate irregular time-series forecasting (IMTS): clinical records,
+    climate series, human activity traces, and other domains where observations
+    arrive at uneven times.
+    \item Present the dominant assumption: because the data are irregular,
+    sparse, and partially observed, strong forecasting requires specialized
+    neural architectures.
+    \item Introduce the central question of the paper: \emph{how much of current
+    IMTS benchmark performance is explained by local history anchoring rather
+    than learned temporal representation?}
+    \item Position APN as the current strong reference point: a recent, simple,
+    effective neural baseline with public scripts, benchmark datasets, and
+    reported results.
+    \item State the main thesis: a small deterministic \family{} can match or
+    outperform recent neural IMTS models under the same APN protocol.
+    \item Contributions:
+    \begin{itemize}
+        \item Define the \family{}: NaiveAnchor, ExpoAnchor, SparseAnchor,
+        ERMAnchor, and \method{}.
+        \item Show how \method{} performs model selection over a shared anchor
+        library without gradient training or test-label tuning.
+        \item Re-evaluate APN benchmark datasets using APN-compatible splits,
+        scaling, masks, and global MAE/MSE metrics.
+        \item Provide ablations and diagnostic analyses that explain when anchor
+        methods succeed and when neural models may still be needed.
+    \end{itemize}
+\end{itemize}
+
+\section{Background and Motivation}
+
+\subsection{Irregular time-series forecasting}
+
+\begin{itemize}
+    \item Define the IMTS setting: each variable has an observation history
+    $H_v=\{(t_i,x_i)\}_{i=1}^{n_v}$ with uneven timestamps and missing targets.
+    \item Explain why common neural approaches use interpolation, attention,
+    message passing, latent ODEs, patching, or time-aware aggregation.
+    \item Clarify the benchmark task considered here: predict the next observed
+    target values for each variable under APN-style masking and scaling.
+\end{itemize}
+
+\subsection{The role of simple baselines}
+
+\begin{itemize}
+    \item Connect to the broader lesson from recent time-series work: complex
+    architectures can be overstated when simple baselines are weak or missing.
+    \item Explain why this question is sharper for IMTS: irregularity often
+    motivates architectural complexity, but many horizons may still be governed
+    by persistence, smoothing, sparse repetition, or local stability.
+    \item State the diagnostic goal: an anchor baseline should be strong enough
+    that a neural model must demonstrate learning beyond local history.
+\end{itemize}
+
+\subsection{APN benchmark protocol}
+
+\begin{itemize}
+    \item Summarize the APN benchmark suite: PhysioNet, USHCN, HumanActivity,
+    and MIMIC.
+    \item State that this paper uses APN loaders, splits, sequence lengths,
+    forecast horizons, scaling, masks, and global scaled MAE/MSE wherever
+    available.
+    \item Separate APN-reported neural baselines from our single-run anchor
+    results.
+\end{itemize}
+
+\section{Problem Setup}
+
+\subsection{Forecasting task}
+
+\begin{itemize}
+    \item For each variable $v$, the model observes an irregular history
+    $H_v$ and predicts the next $K$ target values.
+    \item Inputs include both values and timestamps; the anchor methods do not
+    discard time.
+    \item Forecasts are evaluated only where the APN target mask indicates
+    observed ground-truth values.
+\end{itemize}
+
+\subsection{Metrics}
+
+\begin{itemize}
+    \item Report APN-style global masked scaled MAE and MSE.
+    \item Emphasize MSE because large errors are important in clinical and
+    scientific forecasting.
+    \item In final experiments, include standard deviations when APN exposes
+    multiple seeds or splits; otherwise explicitly report fixed-split,
+    single-run results.
+\end{itemize}
+
+\subsection{Fair comparison protocol}
+
+\begin{itemize}
+    \item Anchor selection uses only train and validation targets.
+    \item The test split is evaluated once after the algorithm is fixed.
+    \item Dataset-specific code is restricted to APN-compatible loading and
+    metadata; anchor selection does not branch on dataset or variable names.
+\end{itemize}
+
+\section{The Anchor Family}
+
+\IfFileExists{docs/tikz/anchor_family.tex}{%
+    \input{docs/tikz/anchor_family}%
+}{%
+    \input{../tikz/anchor_family}%
+}
+
+\subsection{Design principle}
+
+\begin{itemize}
+    \item Treat forecasting as selecting a stable reference point from the
+    irregular observed history.
+    \item Use timestamp-aware candidate summaries rather than learned latent
+    states.
+    \item Make the baseline transparent: every forecast should be traceable to a
+    specific anchor rule and non-test selection criterion.
+\end{itemize}
+
+\subsection{Standalone anchors}
+
+\begin{itemize}
+    \item \textbf{NaiveAnchor}: repeat the last observed value; tests pure
+    persistence.
+    \item \textbf{ExpoAnchor}: exponentially smooth recent observations; tests
+    local stability under noise.
+    \item \textbf{SparseAnchor}: use sparse-history and repeated-value priors;
+    tests whether irregular missingness creates mode-like histories.
+\end{itemize}
+
+\subsection{Selection anchors}
+
+\begin{itemize}
+    \item \textbf{ERMAnchor}: select the candidate anchor that minimizes
+    train+validation scaled MSE.
+    \item \textbf{\method{}}: start from ERMAnchor, then apply generic
+    history-structure priors such as density, repetition, phase-like recurrence,
+    and local stability.
+    \item Explain that \method{} is unified: no dataset-name or variable-name
+    parameter table is used.
+\end{itemize}
+
+\subsection{Computational complexity}
+
+\begin{itemize}
+    \item No backpropagation, no neural parameter training, and no GPU
+    requirement.
+    \item Runtime is dominated by candidate scoring on train+validation and
+    direct anchor generation on test samples.
+    \item Report wall-clock time and memory footprint against APN and other
+    neural baselines.
+\end{itemize}
+
+\section{Experiments}
+
+\subsection{Datasets}
+
+\begin{itemize}
+    \item PhysioNet P12: clinical ICU measurements with many variables and
+    sparse observation patterns.
+    \item USHCN: climate observations with lower variable count and strong
+    temporal persistence.
+    \item HumanActivity: activity trajectories with long histories and dense
+    short-horizon structure.
+    \item MIMIC: credentialed clinical benchmark to be added once local access
+    and preprocessing are finalized.
+\end{itemize}
+
+\subsection{Main benchmark results}
+
+\begin{table*}[t]
+\caption{Current APN benchmark comparison. Lower is better. Bold marks the best
+value in each metric column and underline marks the second best. APN and neural
+baseline values are taken from the APN benchmark table; Anchor-family values are
+single-run APN-style global masked metrics from \texttt{anchor\_results\_family/anchor\_summary.csv}.}
+\label{tab:main-results}
+\centering
+\scriptsize
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccccc}
+\toprule
+Method
+& \multicolumn{2}{c}{HumanActivity}
+& \multicolumn{2}{c}{USHCN}
+& \multicolumn{2}{c}{PhysioNet}
+& \multicolumn{2}{c}{MIMIC} \\
+\cmidrule(lr){2-3}
+\cmidrule(lr){4-5}
+\cmidrule(lr){6-7}
+\cmidrule(lr){8-9}
+& MSE & MAE & MSE & MAE & MSE & MAE & MSE & MAE \\
+\midrule
+PrimeNet & 4.2507$\pm$0.0041 & 1.7018$\pm$0.0011 & 0.4930$\pm$0.0015 & 0.4954$\pm$0.0018 & 0.7953$\pm$0.0000 & 0.6859$\pm$0.0001 & 0.9073$\pm$0.0001 & 0.6614$\pm$0.0001 \\
+NeuralFlows & 0.1722$\pm$0.0090 & 0.3150$\pm$0.0094 & 0.2087$\pm$0.0258 & 0.3157$\pm$0.0187 & 0.4056$\pm$0.0033 & 0.4466$\pm$0.0027 & 0.6085$\pm$0.0101 & 0.5306$\pm$0.0066 \\
+CRU & 0.1387$\pm$0.0073 & 0.2607$\pm$0.0092 & 0.2168$\pm$0.0162 & 0.3180$\pm$0.0248 & 0.6179$\pm$0.0045 & 0.5778$\pm$0.0031 & 0.5895$\pm$0.0092 & 0.5151$\pm$0.0048 \\
+mTAN & 0.0993$\pm$0.0026 & 0.2219$\pm$0.0047 & 0.5561$\pm$0.2020 & 0.5015$\pm$0.0968 & 0.3809$\pm$0.0043 & 0.4291$\pm$0.0035 & 0.9408$\pm$0.1126 & 0.6755$\pm$0.0459 \\
+SeFT & 1.3786$\pm$0.0024 & 0.9762$\pm$0.0007 & 0.3345$\pm$0.0022 & 0.4083$\pm$0.0084 & 0.7721$\pm$0.0021 & 0.6760$\pm$0.0029 & 0.9230$\pm$0.0015 & 0.6628$\pm$0.0008 \\
+GNeuralFlow & 0.3936$\pm$0.1585 & 0.4541$\pm$0.0841 & 0.2205$\pm$0.0421 & 0.3286$\pm$0.0412 & 0.8207$\pm$0.0310 & 0.6759$\pm$0.0100 & 0.8957$\pm$0.0209 & 0.6450$\pm$0.0072 \\
+GRU-D & 0.1893$\pm$0.0627 & 0.3253$\pm$0.0485 & 0.2097$\pm$0.0493 & 0.3045$\pm$0.0305 & 0.3419$\pm$0.0029 & 0.3992$\pm$0.0011 & 0.4759$\pm$0.0100 & 0.4526$\pm$0.0055 \\
+Raindrop & 0.0916$\pm$0.0072 & 0.2114$\pm$0.0072 & 0.2035$\pm$0.0336 & 0.3029$\pm$0.0264 & 0.3478$\pm$0.0019 & 0.4044$\pm$0.0020 & 0.6754$\pm$0.1829 & 0.5444$\pm$0.0868 \\
+Warpformer & 0.0449$\pm$0.0010 & 0.1228$\pm$0.0018 & 0.1888$\pm$0.0598 & 0.2939$\pm$0.0591 & \second{0.3056$\pm$0.0011} & 0.3661$\pm$0.0016 & \second{0.4302$\pm$0.0035} & \second{0.4025$\pm$0.0014} \\
+tPatchGNN & 0.0443$\pm$0.0009 & 0.1247$\pm$0.0031 & 0.1885$\pm$0.0403 & 0.3084$\pm$0.0479 & 0.3133$\pm$0.0053 & 0.3697$\pm$0.0049 & 0.4431$\pm$0.0115 & 0.4077$\pm$0.0088 \\
+GraFITi & 0.0437$\pm$0.0005 & 0.1221$\pm$0.0017 & 0.1691$\pm$0.0093 & 0.2777$\pm$0.0248 & 0.3075$\pm$0.0015 & \second{0.3637$\pm$0.0036} & 0.4359$\pm$0.0455 & 0.4142$\pm$0.0297 \\
+APN & \second{0.0421$\pm$0.0001} & 0.1159$\pm$0.0006 & \second{0.1590$\pm$0.0137} & \second{0.2611$\pm$0.0167} & 0.3093$\pm$0.0011 & 0.3650$\pm$0.0026 & \best{0.4292$\pm$0.0027} & \best{0.4016$\pm$0.0016} \\
+\midrule
+NaiveAnchor & 0.0605 & 0.1225 & 0.3640 & 0.3291 & 0.4154 & 0.3981 & -- & -- \\
+ExpoAnchor & \best{0.0420} & \second{0.1148} & 0.5923 & 0.5117 & 0.3204 & 0.3716 & -- & -- \\
+SparseAnchor & 0.0605 & 0.1225 & 0.2661 & 0.2812 & 0.4154 & 0.3981 & -- & -- \\
+ERMAnchor & 0.0428 & \best{0.1131} & 0.1662 & 0.2635 & \best{0.2962} & \best{0.3556} & -- & -- \\
+\method{} & \best{0.0420} & \second{0.1148} & \best{0.1565} & \best{0.2187} & \best{0.2962} & \best{0.3556} & -- & -- \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\subsection{Anchor-family ladder}
+
+\begin{itemize}
+    \item Report NaiveAnchor, ExpoAnchor, SparseAnchor, ERMAnchor, and
+    \method{} together.
+    \item Use the ladder to show that the headline result is not a black-box
+    trick: each added mechanism has a measurable role.
+    \item Highlight current pattern: persistence alone is strong on some
+    variables, ERM improves PhysioNet, and \method{} is strongest on USHCN.
+\end{itemize}
+
+\subsection{Efficiency comparison}
+
+\begin{table}[t]
+\caption{Efficiency comparison on USHCN. Neural-model GPU memory, parameter
+count, training-step time, and inference-step time are from the APN efficiency
+comparison. Anchor-family rows are CPU-only timings from our completed
+\texttt{anchor\_results\_family} run; they are reported as total
+calibration-plus-forecasting wall time and milliseconds per evaluated target
+prediction, not neural batch-step inference time.}
+\label{tab:efficiency}
+\centering
+\scriptsize
+\begin{tabular}{lcccccc}
+\toprule
+Method
+& GPU Mem. (GB)
+& Params (M)
+& Train Step (ms)
+& Infer. Step (ms)
+& CPU Total (s)
+& CPU ms / Pred. \\
+\midrule
+CRU & 0.89 & 31.25 & 1771.00 & 677.00 & -- & -- \\
+GraFITi & 0.78 & 989.44 & 34.92 & 21.51 & -- & -- \\
+tPatchGNN & 1.09 & 410.71 & 11.35 & 4.22 & -- & -- \\
+APN & 0.19 & 1.97 & 3.89 & 1.46 & -- & -- \\
+\midrule
+NaiveAnchor & 0.00 & 0.00 & N/A & N/A & 0.0681 & 0.1850 \\
+ExpoAnchor & 0.00 & 0.00 & N/A & N/A & 0.0700 & 0.1903 \\
+SparseAnchor & 0.00 & 0.00 & N/A & N/A & 0.0725 & 0.1969 \\
+ERMAnchor & 0.00 & 0.00 & N/A & N/A & 0.0797 & 0.2166 \\
+\method{} & 0.00 & 0.00 & N/A & N/A & 0.0806 & 0.2190 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{itemize}
+    \item Anchor methods have no neural parameters, no gradient-training step,
+    and no GPU requirement.
+    \item The CPU timing includes both non-test anchor selection and test
+    forecasting for USHCN.
+    \item The timing columns should be interpreted by execution mode: neural
+    models report GPU batch-step times; Anchor methods report CPU
+    per-prediction forecasting cost.
+\end{itemize}
+
+\section{Analysis}
+
+\subsection{Why do anchors work?}
+
+\begin{itemize}
+    \item Quantify persistence: how close are future targets to last observed
+    values, recent means, or EMA anchors?
+    \item Stratify by observation density and gap length.
+    \item Show that many benchmark targets are locally stable enough that
+    history anchoring explains much of the performance.
+\end{itemize}
+
+\subsection{Where do anchors fail?}
+
+\begin{itemize}
+    \item Identify high-error tails and sudden regime shifts.
+    \item Analyze PhysioNet variables where clinical changes break persistence.
+    \item Use this section to state what neural models should be tested on if
+    they claim dynamic representation learning.
+\end{itemize}
+
+\subsection{Per-variable and per-dataset diagnostics}
+
+\begin{itemize}
+    \item PhysioNet: heatmap of per-variable MAE/MSE and selected anchor rule.
+    \item USHCN: analyze sparse/repeated climate histories and seasonal
+    structure.
+    \item HumanActivity: analyze dense short-horizon trajectories.
+\end{itemize}
+
+\section{Ablations}
+
+\begin{itemize}
+    \item Remove EMA candidates.
+    \item Remove sparse-history candidates.
+    \item Remove trend and phase-nearest candidates.
+    \item Compare train-only selection, validation-only selection, and
+    train+validation selection.
+    \item Compare MSE-selected anchors with MAE-selected anchors.
+    \item Verify that no test-label tuning or dataset-name-specific parameter
+    choices are used.
+\end{itemize}
+
+\section{Discussion}
+
+\subsection{Are neural models necessary?}
+
+\begin{itemize}
+    \item Give the careful answer: not always under current IMTS benchmark
+    protocols.
+    \item Explain that neural models may still be necessary for long-horizon
+    distribution shift, cross-variable causal dynamics, and true regime changes.
+    \item Reframe \method{} as a diagnostic baseline: a neural model should beat
+    strong anchors before claiming to learn useful irregular dynamics.
+\end{itemize}
+
+\subsection{Implications for benchmarking}
+
+\begin{itemize}
+    \item Future IMTS papers should include NaiveAnchor, ExpoAnchor, ERMAnchor,
+    and \method{} as default baselines.
+    \item Benchmarks should report performance by history density, target gap,
+    variable type, and error tail.
+    \item New datasets should stress conditions where local anchoring is
+    insufficient.
+\end{itemize}
+
+\section{Limitations}
+
+\begin{itemize}
+    \item Current Anchor-family results are single-run on the APN fixed protocol;
+    standard deviations require repeated exposed splits or seeds.
+    \item MIMIC is not yet included in the Anchor-family row because it requires
+    credentialed access and preprocessing.
+    \item Anchor methods are intentionally limited: they do not learn latent
+    representations or cross-variable causal structure.
+    \item Results may reveal benchmark structure rather than universal
+    superiority of non-neural methods.
+\end{itemize}
+
+\section{Conclusion}
+
+\begin{itemize}
+    \item Summarize the main finding: simple history anchors are unexpectedly
+    strong for irregular time-series forecasting.
+    \item State the scientific claim: current IMTS benchmark conclusions are
+    incomplete without strong non-neural anchors.
+    \item Close with the practical value: transparent forecasts, near-zero
+    training cost, and a stronger standard for evaluating future neural models.
+\end{itemize}
+
+\subsubsection*{Author Contributions}
+TODO.
+
+\subsubsection*{Acknowledgments}
+TODO.
+
+\bibliography{references}
+\bibliographystyle{iclr2026_conference}
+
+\appendix
+
+\section{Additional Experimental Details}
+
+\begin{itemize}
+    \item Dataset preprocessing commands.
+    \item Exact APN configuration compatibility.
+    \item Anchor candidate definitions.
+    \item Calibration and selection pseudocode.
+\end{itemize}
+
+\section{Additional Results}
+
+\begin{itemize}
+    \item Full per-variable PhysioNet table.
+    \item Per-dataset calibration logs.
+    \item Runtime and memory measurements.
+    \item MIMIC results once available.
+\end{itemize}
+
+\end{document}

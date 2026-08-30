@@ -1,0 +1,200 @@
+% Anchor family overview.
+% Requires in the paper preamble:
+% \usepackage{tikz}
+% \usetikzlibrary{arrows.meta,calc,positioning,fit,backgrounds}
+
+\begin{figure*}[t]
+\centering
+
+\definecolor{aaInk}{HTML}{253247}
+\definecolor{aaMuted}{HTML}{64748B}
+\definecolor{aaBlue}{HTML}{2563EB}
+\definecolor{aaCyan}{HTML}{0891B2}
+\definecolor{aaGreen}{HTML}{16A34A}
+\definecolor{aaOrange}{HTML}{EA580C}
+\definecolor{aaRed}{HTML}{DC2626}
+\definecolor{aaViolet}{HTML}{7C3AED}
+\definecolor{aaGray}{HTML}{CBD5E1}
+
+\begin{tikzpicture}[
+  x=1cm,
+  y=1cm,
+  font=\sffamily,
+  >=Stealth,
+  box/.style={
+    draw=#1,
+    fill=white,
+    rounded corners=2pt,
+    line width=.55pt,
+    align=left,
+    inner xsep=6pt,
+    inner ysep=5pt
+  },
+  box/.default=aaInk,
+  panel/.style={
+    box=#1,
+    fill=#1!5,
+    minimum height=6.25cm
+  },
+  panel/.default=aaInk,
+  mini/.style={
+    box=#1,
+    fill=#1!8,
+    minimum height=.92cm
+  },
+  mini/.default=aaInk,
+  tag/.style={
+    draw=#1,
+    fill=#1!12,
+    rounded corners=1.5pt,
+    line width=.45pt,
+    font=\scriptsize\sffamily,
+    inner xsep=4pt,
+    inner ysep=2pt
+  },
+  tag/.default=aaInk,
+  arrow/.style={-{Stealth[length=5pt,width=4pt]}, line width=.75pt, draw=aaInk},
+  softarrow/.style={-{Stealth[length=4pt,width=3pt]}, line width=.55pt, draw=#1},
+  softarrow/.default=aaInk,
+  note/.style={font=\scriptsize\sffamily, text=aaMuted, align=center},
+  small/.style={font=\scriptsize\sffamily},
+  title/.style={font=\bfseries\small\sffamily, text=aaInk},
+  subtitle/.style={font=\scriptsize\sffamily, text=aaMuted}
+]
+
+% ---------------------------------------------------------------------
+% Module 1: input history
+% ---------------------------------------------------------------------
+\node[panel=aaBlue, minimum width=3.45cm, anchor=north west] (input) at (0,6.5) {};
+\node[title, anchor=west] at ($(input.north west)+(0.22,-0.28)$) {1. Irregular history};
+\node[subtitle, anchor=west] at ($(input.north west)+(0.22,-0.58)$)
+  {$H_v=\{(t_i,x_i)\}_{i=1}^{n_v}$ per variable};
+
+\begin{scope}[shift={(0.35,4.82)}]
+  \draw[aaGray, line width=.4pt] (0,0) -- (2.75,0);
+  \draw[aaGray, line width=.4pt] (0,0) -- (0,1.05);
+  \foreach \x/\y in {.12/.18,.42/.65,.88/.48,1.34/.92,1.86/.58,2.48/.74} {
+    \draw[aaBlue, fill=white, line width=.65pt] (\x,\y) circle (.055);
+  }
+  \draw[aaBlue, line width=.75pt]
+    (.12,.18) -- (.42,.65) -- (.88,.48) -- (1.34,.92) -- (1.86,.58) -- (2.48,.74);
+  \foreach \x in {.12,.42,.88,1.34,1.86,2.48} {
+    \draw[aaBlue!55, line width=.35pt] (\x,-.06) -- (\x,.02);
+  }
+  \node[small, text=aaMuted, anchor=west] at (0,-.35) {timestamps are uneven};
+\end{scope}
+
+\node[mini=aaBlue, minimum width=2.95cm, text width=2.45cm, anchor=north west] at ($(input.north west)+(0.25,-2.25)$) {
+  \textbf{APN protocol}\\[-1pt]
+  \scriptsize same split, scaler, mask
+};
+\node[mini=aaBlue, minimum width=2.95cm, text width=2.45cm, anchor=north west] at ($(input.north west)+(0.25,-3.35)$) {
+  \textbf{Forecast request}\\[-1pt]
+  \scriptsize next $K$ target values
+};
+\node[tag=aaBlue, anchor=south west] at ($(input.south west)+(0.25,0.25)$)
+  {values + timestamps};
+
+% ---------------------------------------------------------------------
+% Module 2: anchor candidate bank
+% ---------------------------------------------------------------------
+\node[panel=aaGreen, minimum width=5.35cm, anchor=north west] (bank) at (4.05,6.5) {};
+\node[title, anchor=west] at ($(bank.north west)+(0.22,-0.28)$) {2. Shared anchor bank};
+\node[subtitle, anchor=west] at ($(bank.north west)+(0.22,-0.58)$)
+  {candidate forecasts are built without gradient training};
+
+\node[mini=aaGreen, minimum width=4.75cm, text width=4.22cm, anchor=north west] (naive) at ($(bank.north west)+(0.30,-1.08)$) {
+  \textbf{NaiveAnchor}\\[-1pt]
+  \scriptsize repeat the last observed value
+};
+\node[mini=aaCyan, minimum width=4.75cm, text width=4.22cm, anchor=north west] (expo) at ($(bank.north west)+(0.30,-2.22)$) {
+  \textbf{ExpoAnchor}\\[-1pt]
+  \scriptsize exponentially weight recent observations
+};
+\node[mini=aaOrange, minimum width=4.75cm, text width=4.22cm, anchor=north west] (sparse) at ($(bank.north west)+(0.30,-3.36)$) {
+  \textbf{SparseAnchor}\\[-1pt]
+  \scriptsize use repetition, mode, or sparse-history persistence
+};
+\node[mini=aaViolet, minimum width=4.75cm, text width=4.22cm, anchor=north west] (extra) at ($(bank.north west)+(0.30,-4.50)$) {
+  \textbf{Additional candidates}\\[-1pt]
+  \scriptsize recent means, trimmed means, trend, phase-nearest, mixtures
+};
+
+\node[tag=aaGreen, anchor=south west] at ($(bank.south west)+(0.30,0.25)$)
+  {one library for all datasets};
+\node[tag=aaGreen, anchor=south east] at ($(bank.south east)+(-0.30,0.25)$)
+  {CPU friendly};
+
+% ---------------------------------------------------------------------
+% Module 3: selection layer
+% ---------------------------------------------------------------------
+\node[panel=aaViolet, minimum width=5.20cm, anchor=north west] (select) at (10.05,6.5) {};
+\node[title, anchor=west] at ($(select.north west)+(0.22,-0.28)$) {3. Selection layer};
+\node[subtitle, anchor=west] at ($(select.north west)+(0.22,-0.58)$)
+  {choose an anchor before touching the held-out test set};
+
+\node[mini=aaViolet, minimum width=4.58cm, minimum height=1.25cm, text width=4.05cm, anchor=north west] (erm) at ($(select.north west)+(0.32,-1.15)$) {
+  \textbf{ERMAnchor}\\[-1pt]
+  \scriptsize $a_v^\star=\arg\min_{a\in\mathcal{A}}\mathrm{MSE}_{tr+val}(a)$\\[-1pt]
+  \scriptsize optional shrinkage $\beta_v$ is fit only on non-test data
+};
+
+\node[mini=aaRed, minimum width=4.58cm, minimum height=1.55cm, text width=4.05cm, anchor=north west] (auto) at ($(select.north west)+(0.32,-3.05)$) {
+  \textbf{AutoAnchor}\\[-1pt]
+  \scriptsize start from ERMAnchor, then apply generic history-shape priors\\[-1pt]
+  \scriptsize density, repetition, phase-like recurrence, local stability
+};
+
+\node[box=aaInk, fill=aaInk!4, minimum width=4.58cm, minimum height=.75cm, text width=4.05cm, anchor=north west] (out) at ($(select.north west)+(0.32,-5.05)$) {
+  \textbf{Forecast}\\[-1pt]
+  \scriptsize selected anchor $\rightarrow$ next $K$ values $\rightarrow$ APN MSE/MAE
+};
+
+% ---------------------------------------------------------------------
+% Connectors
+% ---------------------------------------------------------------------
+\draw[arrow] ($(input.east)+(0,.35)$) -- ($(bank.west)+(0,.35)$);
+\node[note, fill=white, inner xsep=2pt] at (3.72,4.92) {extract\\history};
+
+\draw[arrow] ($(bank.east)+(0,.30)$) -- ($(select.west)+(0,.30)$);
+\node[note, fill=white, inner xsep=2pt] at (9.74,4.92) {score\\candidates};
+
+\draw[softarrow=aaGreen] (naive.east) .. controls +(0.55,0.08) and +(-.55,.45) .. (erm.west);
+\draw[softarrow=aaCyan] (expo.east) .. controls +(0.65,0.00) and +(-.55,.25) .. (erm.west);
+\draw[softarrow=aaOrange] (sparse.east) .. controls +(0.65,-.10) and +(-.55,.05) .. (erm.west);
+\draw[softarrow=aaViolet] (extra.east) .. controls +(0.65,-.20) and +(-.55,-.18) .. (erm.west);
+
+\draw[softarrow=aaViolet] (erm.south) -- ($(erm.south)+(0,-.35)$) -- ($(auto.north)+(0,.03)$);
+\draw[softarrow=aaRed] (auto.south) -- (out.north);
+
+% Direct family outputs
+\draw[softarrow=aaGreen, dashed] (naive.south west) .. controls +(-.25,-.65) and +(-.80,.15) .. ($(out.west)+(0,.18)$);
+\draw[softarrow=aaCyan, dashed] (expo.south west) .. controls +(-.25,-.75) and +(-.80,.05) .. ($(out.west)+(0,.05)$);
+\draw[softarrow=aaOrange, dashed] (sparse.south west) .. controls +(-.25,-.65) and +(-.80,-.10) .. ($(out.west)+(0,-.08)$);
+
+% ---------------------------------------------------------------------
+% Bottom comparison strip
+% ---------------------------------------------------------------------
+\node[box=aaInk, fill=aaInk!3, minimum width=15.25cm, minimum height=.95cm, anchor=north west]
+  (strip) at (0,0.05) {};
+\node[small, text=aaInk, anchor=west, text width=12.8cm] at ($(strip.west)+(0.25,0.28)$) {
+  \textbf{Anchor family ladder:}
+  NaiveAnchor and ExpoAnchor test persistence and smoothing;
+  SparseAnchor tests repeated sparse histories;
+  ERMAnchor tests non-neural selection;
+  AutoAnchor is the headline unified method.
+};
+\node[tag=aaInk, anchor=east] at ($(strip.east)+(-0.22,0.28)$)
+  {no backprop, no GPU};
+
+\end{tikzpicture}
+\caption{
+The Anchor family for irregular time-series forecasting.
+All methods consume the same irregular history and use the same APN data splits,
+scaling, masks, and metrics. Standalone anchors forecast directly from history,
+ERMAnchor selects from the shared candidate bank using only train+validation
+risk, and AutoAnchor adds generic history-structure priors before the final
+held-out test evaluation.
+}
+\label{fig:anchor-family}
+\end{figure*}

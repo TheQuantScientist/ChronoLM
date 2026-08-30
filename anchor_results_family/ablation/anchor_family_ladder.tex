@@ -1,0 +1,34 @@
+% Requires \usepackage{booktabs,multirow}
+\begin{table*}[t]
+\caption{Anchor-family ablation ladder. Lower is better for MSE and MAE.
+Bold marks the best Anchor-family value within each dataset; underline marks
+the second best. Positive deltas indicate improvement over NaiveAnchor.}
+\label{tab:anchor-family-ladder}
+\centering
+\scriptsize
+\begin{tabular}{llrrrr}
+\toprule
+Dataset & Method & MSE & $\Delta$ MSE vs Naive & MAE & $\Delta$ MAE vs Naive \\
+\midrule
+\multirow{5}{*}{\begin{tabular}[c]{@{}c@{}}P12\\(predictions=21662)\end{tabular}} & NaiveAnchor & 0.4154 & +0.0000 & 0.3981 & +0.0000 \\
+ & ExpoAnchor & \underline{0.3204} & +0.0951 & \underline{0.3716} & +0.0265 \\
+ & SparseAnchor & 0.4154 & +0.0000 & 0.3981 & +0.0000 \\
+ & ERMAnchor & \textbf{0.2962} & +0.1192 & \textbf{0.3556} & +0.0425 \\
+ & AutoAnchor & \textbf{0.2962} & +0.1192 & \textbf{0.3556} & +0.0425 \\
+\midrule
+\multirow{5}{*}{\begin{tabular}[c]{@{}c@{}}USHCN\\(predictions=368)\end{tabular}} & NaiveAnchor & 0.3640 & +0.0000 & 0.3291 & +0.0000 \\
+ & ExpoAnchor & 0.5923 & -0.2284 & 0.5117 & -0.1826 \\
+ & SparseAnchor & 0.2661 & +0.0978 & 0.2812 & +0.0479 \\
+ & ERMAnchor & \underline{0.1662} & +0.1977 & \underline{0.2635} & +0.0656 \\
+ & AutoAnchor & \textbf{0.1565} & +0.2074 & \textbf{0.2187} & +0.1104 \\
+\midrule
+\multirow{5}{*}{\begin{tabular}[c]{@{}c@{}}HumanActivity\\(predictions=5910)\end{tabular}} & NaiveAnchor & 0.0605 & +0.0000 & 0.1225 & +0.0000 \\
+ & ExpoAnchor & \textbf{0.0420} & +0.0185 & \underline{0.1148} & +0.0078 \\
+ & SparseAnchor & 0.0605 & +0.0000 & 0.1225 & +0.0000 \\
+ & ERMAnchor & \underline{0.0428} & +0.0177 & \textbf{0.1131} & +0.0094 \\
+ & AutoAnchor & \textbf{0.0420} & +0.0185 & \underline{0.1148} & +0.0078 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+% Generated from anchor_summary.csv using global metrics.

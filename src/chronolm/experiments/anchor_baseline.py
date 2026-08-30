@@ -38,8 +38,22 @@ APN_BASELINES = {
     "USHCN": {"MAE": 0.2611, "MSE": 0.1590},
 }
 
-METHOD_NAME = "auto_anchor"
-RUN_NAME_PREFIX = "auto_anchor_unified"
+DEFAULT_ANCHOR_METHOD = "AutoAnchor"
+ANCHOR_FAMILY_METHODS = (
+    "NaiveAnchor",
+    "ExpoAnchor",
+    "SparseAnchor",
+    "ERMAnchor",
+    "AutoAnchor",
+)
+ANCHOR_METHOD_SLUGS = {
+    "NaiveAnchor": "naive_anchor",
+    "ExpoAnchor": "expo_anchor",
+    "SparseAnchor": "sparse_anchor",
+    "ERMAnchor": "erm_anchor",
+    "AutoAnchor": "auto_anchor",
+}
+RUN_NAME_PREFIX = "anchor_family"
 
 PHASE_COMPONENTS = {
     "phase025k3": (0.25, 3),
@@ -167,11 +181,47 @@ def canonical_dataset_name(dataset_name: str) -> str:
         raise ValueError(f"Unsupported dataset {dataset_name!r}. Use one of: {supported}") from exc
 
 
+def canonical_anchor_method(method_name: str) -> str:
+    normalized = method_name.strip().replace("-", "_").replace(" ", "_").lower()
+    aliases = {
+        "naive": "NaiveAnchor",
+        "naive_anchor": "NaiveAnchor",
+        "naiveanchor": "NaiveAnchor",
+        "last": "NaiveAnchor",
+        "last_anchor": "NaiveAnchor",
+        "expo": "ExpoAnchor",
+        "expo_anchor": "ExpoAnchor",
+        "expoanchor": "ExpoAnchor",
+        "ema": "ExpoAnchor",
+        "ema_anchor": "ExpoAnchor",
+        "sparse": "SparseAnchor",
+        "sparse_anchor": "SparseAnchor",
+        "sparseanchor": "SparseAnchor",
+        "mode": "SparseAnchor",
+        "mode_anchor": "SparseAnchor",
+        "erm": "ERMAnchor",
+        "erm_anchor": "ERMAnchor",
+        "ermanchor": "ERMAnchor",
+        "auto_anchor_erm": "ERMAnchor",
+        "autoanchor_erm": "ERMAnchor",
+        "auto": "AutoAnchor",
+        "auto_anchor": "AutoAnchor",
+        "autoanchor": "AutoAnchor",
+        "full": "AutoAnchor",
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as exc:
+        supported = ", ".join(ANCHOR_FAMILY_METHODS)
+        raise ValueError(f"Unsupported anchor method {method_name!r}. Use one of: {supported}") from exc
+
+
 @dataclass(frozen=True)
 class AnchorConfig:
     """Configuration for one deterministic anchor benchmark run."""
 
     dataset_name: str = "P12"
+    anchor_method: str = DEFAULT_ANCHOR_METHOD
     seq_len: int | None = None
     pred_len: int | None = None
     max_test_samples: int | None = None
@@ -188,12 +238,15 @@ class AnchorConfig:
 
     def __post_init__(self) -> None:
         dataset_name = canonical_dataset_name(self.dataset_name)
+        anchor_method = canonical_anchor_method(self.anchor_method)
         defaults = DATASET_DEFAULTS[dataset_name]
-        run_name = self.run_name or f"{RUN_NAME_PREFIX}_{dataset_name.lower()}"
+        method_slug = ANCHOR_METHOD_SLUGS[anchor_method]
+        run_name = self.run_name or f"{RUN_NAME_PREFIX}_{method_slug}_{dataset_name.lower()}"
         output_dir = self.output_dir or Path("anchor_results") / dataset_name.lower()
         output_dir.mkdir(parents=True, exist_ok=True)
 
         object.__setattr__(self, "dataset_name", dataset_name)
+        object.__setattr__(self, "anchor_method", anchor_method)
         object.__setattr__(self, "seq_len", self.seq_len or defaults["seq_len"])
         object.__setattr__(self, "pred_len", self.pred_len or defaults["pred_len"])
         object.__setattr__(self, "run_name", run_name)
@@ -803,8 +856,10 @@ def extract_variable_samples(
     config: AnchorConfig,
     variable_index: int,
     encoder_index: int,
+    components: Iterable[str] | None = None,
 ) -> list[dict[str, object]]:
     samples: list[dict[str, object]] = []
+    components_to_cache = tuple(components or AUTO_ANCHOR_COMPONENTS)
     for sample_index in range(len(dataset)):
         extracted = extract_variable_sample(
             sample=dataset[sample_index],
@@ -824,7 +879,7 @@ def extract_variable_samples(
                     target_times=extracted["target_times"],
                     lookback_span=float(config.seq_len),
                 )
-                for component in AUTO_ANCHOR_COMPONENTS
+                for component in components_to_cache
             }
             samples.append(extracted)
     return samples
@@ -919,12 +974,14 @@ def score_candidate_on_dataset(
 def append_calibration_row(
     rows: list[dict[str, object]],
     benchmark: BenchmarkData,
+    family_method: str,
     variable_name: str,
     spec: AnchorSpec,
 ) -> None:
     rows.append(
         {
             "Dataset": benchmark.name,
+            "Family": family_method,
             "Variable": variable_name,
             "Method": spec.method,
             "Beta": round(spec.beta, 6),
@@ -1055,6 +1112,37 @@ def choose_structural_prior_method(
     return None
 
 
+def choose_sparse_anchor_method(samples: list[dict[str, object]]) -> tuple[str, str]:
+    stats = variable_history_statistics(samples)
+    mode_fraction = stats["mode_fraction"]
+    unique_count = stats["unique_count"]
+
+    if mode_fraction > 0.95:
+        return (
+            "mode",
+            f"SparseAnchor: dominant observed value; mode_fraction={mode_fraction:.4f}",
+        )
+
+    if mode_fraction > 0.50 and unique_count > 150:
+        return (
+            "mode",
+            "SparseAnchor: high-cardinality sparse channel with dominant baseline; "
+            f"mode_fraction={mode_fraction:.4f}; unique_count={unique_count:.0f}",
+        )
+
+    if mode_fraction > 0.50:
+        return (
+            "mix_last80_phase033k520",
+            "SparseAnchor: sparse channel with recent departures from baseline; "
+            f"mode_fraction={mode_fraction:.4f}; unique_count={unique_count:.0f}",
+        )
+
+    return (
+        "last",
+        "SparseAnchor: no dominant sparse baseline detected; fallback to last value",
+    )
+
+
 def build_spec_for_candidate(
     benchmark: BenchmarkData,
     encoder_index: int,
@@ -1122,67 +1210,126 @@ def candidate_beta_options(
     return options
 
 
-def calibrate_auto_anchor(
+def select_erm_spec(
+    benchmark: BenchmarkData,
+    encoder_index: int,
+    fit_samples: list[dict[str, object]],
+    validation_samples: list[dict[str, object]],
+    calibration_samples: list[dict[str, object]],
+) -> AnchorSpec | None:
+    best_spec: AnchorSpec | None = None
+    best_key: tuple[float, float, float, str, str] | None = None
+
+    for candidate in AUTO_ANCHOR_CANDIDATES:
+        beta_options = candidate_beta_options(
+            samples=calibration_samples,
+            candidate=candidate,
+        )
+
+        for beta_source, beta in beta_options:
+            candidate_spec = build_spec_for_candidate(
+                benchmark=benchmark,
+                encoder_index=encoder_index,
+                candidate=candidate,
+                beta=beta,
+                beta_source=beta_source,
+                source="non_test_empirical_risk",
+                rationale=(
+                    "shared anchor library; beta and candidate selected by "
+                    "pooled APN train+validation scaled MSE"
+                ),
+                fit_samples=fit_samples,
+                validation_samples=validation_samples,
+                calibration_samples=calibration_samples,
+            )
+            selection_key = (
+                candidate_spec.calibration_mse,
+                candidate_spec.calibration_mae,
+                candidate_spec.validation_mse,
+                candidate.name,
+                beta_source,
+            )
+            if best_key is None or selection_key < best_key:
+                best_key = selection_key
+                best_spec = candidate_spec
+
+    return best_spec
+
+
+def build_family_spec(
+    family_method: str,
     benchmark: BenchmarkData,
     config: AnchorConfig,
-    logger: logging.Logger,
-    rows: list[dict[str, object]],
-) -> dict[str, AnchorSpec]:
-    specs: dict[str, AnchorSpec] = {}
-
-    for variable_index, variable_name in enumerate(benchmark.columns):
-        encoder_index = benchmark.encoder_index_by_column[variable_name]
-        fit_samples = extract_variable_samples(
-            dataset=benchmark.fit_dataset,
+    encoder_index: int,
+    fit_samples: list[dict[str, object]],
+    validation_samples: list[dict[str, object]],
+    calibration_samples: list[dict[str, object]],
+) -> AnchorSpec | None:
+    if family_method == "NaiveAnchor":
+        return build_spec_for_candidate(
             benchmark=benchmark,
-            config=config,
-            variable_index=variable_index,
             encoder_index=encoder_index,
+            candidate=AUTO_ANCHOR_BY_NAME["last"],
+            beta=1.0,
+            beta_source="identity",
+            source="fixed_history_anchor",
+            rationale="NaiveAnchor: repeat the last observed value",
+            fit_samples=fit_samples,
+            validation_samples=validation_samples,
+            calibration_samples=calibration_samples,
         )
-        validation_samples = extract_variable_samples(
-            dataset=benchmark.selection_dataset,
+
+    if family_method == "ExpoAnchor":
+        method = horizon_ema_method(config)
+        horizon_ratio = float(config.pred_len) / float(config.seq_len)
+        return build_spec_for_candidate(
             benchmark=benchmark,
-            config=config,
-            variable_index=variable_index,
             encoder_index=encoder_index,
+            candidate=AUTO_ANCHOR_BY_NAME[method],
+            beta=1.0,
+            beta_source="identity",
+            source="fixed_exponential_smoothing",
+            rationale=(
+                f"ExpoAnchor: EMA alpha derived from sqrt(pred_len/seq_len); "
+                f"horizon_ratio={horizon_ratio:.4f}"
+            ),
+            fit_samples=fit_samples,
+            validation_samples=validation_samples,
+            calibration_samples=calibration_samples,
         )
-        calibration_samples = fit_samples + validation_samples
-        best_spec: AnchorSpec | None = None
-        best_key: tuple[float, float, float, str, str] | None = None
 
-        for candidate in AUTO_ANCHOR_CANDIDATES:
-            beta_options = candidate_beta_options(
-                samples=calibration_samples,
-                candidate=candidate,
-            )
+    if family_method == "SparseAnchor":
+        method, rationale = choose_sparse_anchor_method(calibration_samples)
+        return build_spec_for_candidate(
+            benchmark=benchmark,
+            encoder_index=encoder_index,
+            candidate=AUTO_ANCHOR_BY_NAME[method],
+            beta=1.0,
+            beta_source="identity",
+            source="sparse_history_prior",
+            rationale=rationale,
+            fit_samples=fit_samples,
+            validation_samples=validation_samples,
+            calibration_samples=calibration_samples,
+        )
 
-            for beta_source, beta in beta_options:
-                candidate_spec = build_spec_for_candidate(
-                    benchmark=benchmark,
-                    encoder_index=encoder_index,
-                    candidate=candidate,
-                    beta=beta,
-                    beta_source=beta_source,
-                    source="non_test_empirical_risk",
-                    rationale=(
-                        "shared AutoAnchor library; beta and candidate selected by "
-                        "pooled APN train+validation scaled MSE"
-                    ),
-                    fit_samples=fit_samples,
-                    validation_samples=validation_samples,
-                    calibration_samples=calibration_samples,
-                )
-                selection_key = (
-                    candidate_spec.calibration_mse,
-                    candidate_spec.calibration_mae,
-                    candidate_spec.validation_mse,
-                    candidate.name,
-                    beta_source,
-                )
-                if best_key is None or selection_key < best_key:
-                    best_key = selection_key
-                    best_spec = candidate_spec
+    if family_method == "ERMAnchor":
+        return select_erm_spec(
+            benchmark=benchmark,
+            encoder_index=encoder_index,
+            fit_samples=fit_samples,
+            validation_samples=validation_samples,
+            calibration_samples=calibration_samples,
+        )
 
+    if family_method == "AutoAnchor":
+        best_spec = select_erm_spec(
+            benchmark=benchmark,
+            encoder_index=encoder_index,
+            fit_samples=fit_samples,
+            validation_samples=validation_samples,
+            calibration_samples=calibration_samples,
+        )
         structural_prior = choose_structural_prior_method(calibration_samples, config)
         if structural_prior is not None:
             method, rationale = structural_prior
@@ -1198,6 +1345,65 @@ def calibrate_auto_anchor(
                 validation_samples=validation_samples,
                 calibration_samples=calibration_samples,
             )
+        return best_spec
+
+    raise ValueError(f"Unsupported anchor family method: {family_method}")
+
+
+def required_components_for_family_method(
+    family_method: str,
+    config: AnchorConfig,
+) -> tuple[str, ...]:
+    if family_method == "NaiveAnchor":
+        return ("last",)
+
+    if family_method == "ExpoAnchor":
+        return (horizon_ema_method(config),)
+
+    if family_method == "SparseAnchor":
+        return ("last", "mode", "phase033k5", "trend8")
+
+    return AUTO_ANCHOR_COMPONENTS
+
+
+def calibrate_anchor_family(
+    benchmark: BenchmarkData,
+    config: AnchorConfig,
+    logger: logging.Logger,
+    rows: list[dict[str, object]],
+) -> dict[str, AnchorSpec]:
+    specs: dict[str, AnchorSpec] = {}
+    family_method = config.anchor_method
+    required_components = required_components_for_family_method(family_method, config)
+
+    for variable_index, variable_name in enumerate(benchmark.columns):
+        encoder_index = benchmark.encoder_index_by_column[variable_name]
+        fit_samples = extract_variable_samples(
+            dataset=benchmark.fit_dataset,
+            benchmark=benchmark,
+            config=config,
+            variable_index=variable_index,
+            encoder_index=encoder_index,
+            components=required_components,
+        )
+        validation_samples = extract_variable_samples(
+            dataset=benchmark.selection_dataset,
+            benchmark=benchmark,
+            config=config,
+            variable_index=variable_index,
+            encoder_index=encoder_index,
+            components=required_components,
+        )
+        calibration_samples = fit_samples + validation_samples
+        best_spec = build_family_spec(
+            family_method=family_method,
+            benchmark=benchmark,
+            config=config,
+            encoder_index=encoder_index,
+            fit_samples=fit_samples,
+            validation_samples=validation_samples,
+            calibration_samples=calibration_samples,
+        )
 
         if best_spec is None:
             best_spec = AnchorSpec(
@@ -1218,10 +1424,11 @@ def calibrate_auto_anchor(
             )
 
         specs[variable_name] = best_spec
-        append_calibration_row(rows, benchmark, variable_name, best_spec)
+        append_calibration_row(rows, benchmark, family_method, variable_name, best_spec)
         logger.info(
-            "  [AUTO] %s method=%s beta=%.4f (%s) source=%s cal_mae=%.6f "
+            "  [%s] %s method=%s beta=%.4f (%s) source=%s cal_mae=%.6f "
             "cal_mse=%.6f train_mse=%.6f val_mse=%.6f points=%s",
+            family_method,
             variable_name,
             best_spec.method,
             best_spec.beta,
@@ -1244,12 +1451,12 @@ def calibrate_anchor_specs(
 ) -> dict[str, AnchorSpec]:
     rows: list[dict[str, object]] = []
 
-    logger.info("Calibrating AutoAnchor with a shared candidate library...")
+    logger.info("Calibrating %s with the shared anchor family...", config.anchor_method)
     logger.info("  Fit samples: %s", len(benchmark.fit_dataset))
     logger.info("  Validation samples: %s", len(benchmark.selection_dataset))
-    logger.info("  Selection objective: pooled train+validation scaled MSE")
+    logger.info("  Selection objective: %s", config.anchor_method)
     logger.info("  Candidate rules: %s", len(AUTO_ANCHOR_CANDIDATES))
-    specs = calibrate_auto_anchor(benchmark, config, logger, rows)
+    specs = calibrate_anchor_family(benchmark, config, logger, rows)
 
     pd.DataFrame(rows).to_csv(config.calibration_csv, index=False)
     logger.info("Calibration CSV: %s", config.calibration_csv)
@@ -1306,7 +1513,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
 
     logger.info("Run name: %s", config.run_name)
     logger.info("Dataset: %s", config.dataset_name)
-    logger.info("Method: %s", METHOD_NAME)
+    logger.info("Method: %s", config.anchor_method)
     logger.info("Output directory: %s", config.output_dir)
     logger.info("Loading %s data through the APN pipeline...", config.dataset_name)
     load_start = time.time()
@@ -1324,7 +1531,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
     all_results, processed_variables = load_checkpoint(config.checkpoint_csv, logger)
 
     logger.info("\n%s", "=" * 70)
-    logger.info("  AutoAnchor baseline - %s", benchmark.display_name)
+    logger.info("  %s baseline - %s", config.anchor_method, benchmark.display_name)
     logger.info("  Lookback=%s, forecast=%s", config.seq_len, config.pred_len)
     logger.info("  Test samples: %s", n_samples)
     logger.info("%s", "=" * 70)
@@ -1447,7 +1654,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
                 detail_rows.append(
                     {
                         "Dataset": benchmark.name,
-                        "Method": METHOD_NAME,
+                        "Method": config.anchor_method,
                         "Variable": variable_name,
                         "Entity": sample_key,
                         "Step": step_index,
@@ -1510,7 +1717,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
         result_row = {
             "Dataset": benchmark.name,
             "Variable": variable_name,
-            "Method": METHOD_NAME,
+            "Method": config.anchor_method,
             "MAE_scaled": round(float(np.mean(mae_scaled)), 6),
             "MSE_scaled": round(float(np.mean(mse_scaled)), 6),
             "MAE_raw": round(float(np.mean(mae_raw)), 4),
@@ -1545,7 +1752,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
         logger.info("No results were produced.")
         return {
             "Dataset": benchmark.name,
-            "Method": METHOD_NAME,
+            "Method": config.anchor_method,
             "MAE_scaled": float("nan"),
             "MSE_scaled": float("nan"),
         }
@@ -1561,7 +1768,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
     total_fallback = int(results["Fallback"].sum())
 
     logger.info("\n%s", "=" * 70)
-    logger.info("  AutoAnchor baseline - %s results", benchmark.display_name)
+    logger.info("  %s baseline - %s results", config.anchor_method, benchmark.display_name)
     logger.info("%s", "=" * 70)
     logger.info(
         "\n%s",
@@ -1593,7 +1800,8 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
         mse_delta = baseline["MSE"] - global_metrics["MSE_scaled"]
         logger.info("APN paper baseline: MAE=%.4f, MSE=%.4f", baseline["MAE"], baseline["MSE"])
         logger.info(
-            "AutoAnchor comparison result: MAE=%.4f, MSE=%.4f",
+            "%s comparison result: MAE=%.4f, MSE=%.4f",
+            config.anchor_method,
             global_metrics["MAE_scaled"],
             global_metrics["MSE_scaled"],
         )
@@ -1605,7 +1813,7 @@ def run(config: AnchorConfig) -> dict[str, float | str]:
 
     summary = {
         "Dataset": benchmark.name,
-        "Method": METHOD_NAME,
+        "Method": config.anchor_method,
         "Equal_variable_MAE_scaled": avg_mae,
         "Equal_variable_MSE_scaled": avg_mse,
         "Predictions": float(total_predictions),

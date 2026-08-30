@@ -1,4 +1,4 @@
-"""Run ChronoLM's AutoAnchor baseline on APN benchmark splits."""
+"""Run ChronoLM's anchor-family baselines on APN benchmark splits."""
 
 from __future__ import annotations
 
@@ -14,8 +14,11 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from chronolm.experiments.anchor_baseline import (
+    ANCHOR_FAMILY_METHODS,
+    ANCHOR_METHOD_SLUGS,
     RUN_NAME_PREFIX,
     AnchorConfig,
+    canonical_anchor_method,
     canonical_dataset_name,
     run,
 )
@@ -26,7 +29,7 @@ DATASET_ORDER = ["P12", "USHCN", "HumanActivity"]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run AutoAnchor baselines with APN data splits and metrics."
+        description="Run anchor-family baselines with APN data splits and metrics."
     )
     parser.add_argument(
         "--dataset",
@@ -38,6 +41,20 @@ def parse_args() -> argparse.Namespace:
         "--all",
         action="store_true",
         help="Run all currently supported anchor datasets.",
+    )
+    parser.add_argument(
+        "--method",
+        action="append",
+        default=[],
+        help=(
+            "Anchor method to run: NaiveAnchor, ExpoAnchor, SparseAnchor, "
+            "ERMAnchor, AutoAnchor, or family. May be repeated."
+        ),
+    )
+    parser.add_argument(
+        "--family",
+        action="store_true",
+        help="Run the full anchor family: NaiveAnchor, ExpoAnchor, SparseAnchor, ERMAnchor, AutoAnchor.",
     )
     parser.add_argument(
         "--output-root",
@@ -85,21 +102,42 @@ def selected_datasets(args: argparse.Namespace) -> list[str]:
     return datasets
 
 
+def selected_methods(args: argparse.Namespace) -> list[str]:
+    raw_names = args.method or []
+    if args.family or any(name.lower() in {"all", "family"} for name in raw_names):
+        return list(ANCHOR_FAMILY_METHODS)
+
+    if not raw_names:
+        return ["AutoAnchor"]
+
+    seen: set[str] = set()
+    methods: list[str] = []
+    for raw_name in raw_names:
+        for part in raw_name.split(","):
+            method = canonical_anchor_method(part)
+            if method not in seen:
+                seen.add(method)
+                methods.append(method)
+    return methods
+
+
 def main() -> None:
     args = parse_args()
     summaries: list[dict] = []
 
     for dataset in selected_datasets(args):
-        output_dir = args.output_root / dataset.lower()
-        config = AnchorConfig(
-            dataset_name=dataset,
-            max_test_samples=args.max_test_samples,
-            run_name=f"{RUN_NAME_PREFIX}_{dataset.lower()}",
-            output_dir=output_dir,
-            trace_every=args.trace_every,
-            progress_every=args.progress_every,
-        )
-        summaries.append(run(config))
+        for method in selected_methods(args):
+            output_dir = args.output_root / dataset.lower()
+            config = AnchorConfig(
+                dataset_name=dataset,
+                anchor_method=method,
+                max_test_samples=args.max_test_samples,
+                run_name=f"{RUN_NAME_PREFIX}_{ANCHOR_METHOD_SLUGS[method]}_{dataset.lower()}",
+                output_dir=output_dir,
+                trace_every=args.trace_every,
+                progress_every=args.progress_every,
+            )
+            summaries.append(run(config))
 
     args.output_root.mkdir(parents=True, exist_ok=True)
     summary_path = args.output_root / "anchor_summary.csv"

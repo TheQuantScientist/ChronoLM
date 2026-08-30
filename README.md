@@ -6,14 +6,14 @@ forecasting when evaluated with the same APN data splits and scaled metrics?
 
 The upstream APN repository is kept under `APN/` and remains the source of truth
 for trained APN and paper-baseline model settings. ChronoLM code outside that
-folder only contains our AutoAnchor runner and orchestration utilities.
+folder only contains our anchor-family runner and orchestration utilities.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
 | `APN/` | Upstream APN implementation, datasets, configs, and model scripts. |
-| `src/chronolm/experiments/anchor_baseline.py` | AutoAnchor runner using APN data loaders and metrics. |
+| `src/chronolm/experiments/anchor_baseline.py` | Anchor-family runner using APN data loaders and metrics. |
 | `run_anchor_baseline.py` | Root-level launcher for anchor runs on P12, USHCN, and HumanActivity. |
 | `run_apn_paper_models.py` | Root-level wrapper for APN paper model scripts. |
 | `scripts/compute_global_metrics.py` | Utility for APN-style global MAE/MSE from detail logs. |
@@ -46,7 +46,7 @@ MIMIC requires credentialed access. Follow `APN/README.md` and place
 
 ## Run Anchor Baselines
 
-Run all currently supported anchor datasets:
+Run the headline AutoAnchor method on all currently supported anchor datasets:
 
 ```bash
 python run_anchor_baseline.py --all
@@ -58,6 +58,19 @@ Run one dataset:
 python run_anchor_baseline.py --dataset P12
 python run_anchor_baseline.py --dataset USHCN
 python run_anchor_baseline.py --dataset HumanActivity
+```
+
+Run the full anchor family for ablation:
+
+```bash
+python run_anchor_baseline.py --all --family
+```
+
+Run selected family members:
+
+```bash
+python run_anchor_baseline.py --dataset USHCN --method NaiveAnchor --method AutoAnchor
+python run_anchor_baseline.py --dataset P12 --method ERMAnchor
 ```
 
 Cheap smoke test:
@@ -77,19 +90,21 @@ Outputs go under `anchor_results/<dataset>/` and include:
 | `*_debug.log` | Progress and compact trace logging. |
 | `anchor_results/anchor_summary.csv` | APN-style global summary across completed datasets. |
 
-AutoAnchor uses one shared candidate library for every supported dataset and
-variable. Dataset-specific code is limited to APN data loading, split choice,
-and benchmark window sizes. The selector first evaluates candidates on APN
-train+validation targets; when the observed histories have a strong generic
-signature, such as sparse mode dominance, long-window short-horizon dynamics,
-or seasonal phase structure, a deterministic history-only prior selects the
-corresponding candidate. Test labels are used only once for final reporting.
-The calibration CSV records the source and rationale for every variable.
+The anchor family contains `NaiveAnchor`, `ExpoAnchor`, `SparseAnchor`,
+`ERMAnchor`, and `AutoAnchor`. AutoAnchor uses one shared candidate library for
+every supported dataset and variable. Dataset-specific code is limited to APN
+data loading, split choice, and benchmark window sizes. The selector first
+evaluates candidates on APN train+validation targets; when the observed
+histories have a strong generic signature, such as sparse mode dominance,
+long-window short-horizon dynamics, or seasonal phase structure, a
+deterministic history-only prior selects the corresponding candidate. Test
+labels are used only once for final reporting. The calibration CSV records the
+family member, selected candidate, source, and rationale for every variable.
 
 Compute APN-style metrics from any detail log:
 
 ```bash
-python scripts/compute_global_metrics.py anchor_results/p12/auto_anchor_unified_p12_P12_DetailLog.csv
+python scripts/compute_global_metrics.py anchor_results/p12/anchor_family_auto_anchor_p12_P12_DetailLog.csv
 ```
 
 ## Run APN Paper Models
